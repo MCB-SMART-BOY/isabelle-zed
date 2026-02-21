@@ -5,7 +5,10 @@ SHELL := /bin/bash
 	 scala-test \
 	 lsp-build lsp-test lsp-clippy \
 	 zed-build zed-check \
+	 doctor \
 	 release-build \
+	 install-local \
+	 release-package \
 	 bridge-mock-up bridge-mock-down \
 	 mock-bridge mock-bridge-adapter mock-adapter mock-send mock-lsp-e2e \
 	 native-lsp-smoke
@@ -37,8 +40,17 @@ zed-build:
 zed-check:
 	cargo check --manifest-path zed-extension/Cargo.toml
 
+doctor:
+	./scripts/doctor.sh
+
 release-build:
 	./scripts/build_release.sh
+
+install-local:
+	./scripts/install_local.sh
+
+release-package:
+	./scripts/package_release.sh
 
 bridge-mock-up:
 	./scripts/bridge_mock_up.sh /tmp/isabelle.sock

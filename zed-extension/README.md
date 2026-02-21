@@ -75,6 +75,17 @@ Minimal inline example:
 }
 ```
 
+## Release and packaging notes
+
+From repo root:
+
+```bash
+make doctor
+make release-package
+```
+
+The package includes extension sources, prebuilt wasm artifact, and `bridge`/`isabelle-zed-lsp` binaries.
+
 ## Commands exposed by the LSP proxy
 
 - `isabelle.start_session`

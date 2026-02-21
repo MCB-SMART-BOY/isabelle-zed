@@ -46,6 +46,38 @@ Copy the JSON content into your Zed `settings.json`.
 
 If native mode is active and `isabelle` is on `PATH`, diagnostics/hover are provided by Isabelle.
 
+## Local install helpers
+
+### Doctor check
+
+```bash
+make doctor
+```
+
+### Install local binaries (`bridge`, `isabelle-zed-lsp`)
+
+```bash
+make install-local
+```
+
+By default this installs into `~/.local/bin`.
+Set `ISABELLE_ZED_BIN_DIR` to install elsewhere.
+
+## Release packaging
+
+Create a distributable tarball in `dist/`:
+
+```bash
+make release-package
+```
+
+This generates:
+
+- `dist/isabelle-zed-v<version>-<platform>.tar.gz`
+- `dist/isabelle-zed-v<version>-<platform>.tar.gz.sha256`
+
+GitHub tag pushes like `v0.1.0` trigger `.github/workflows/release.yml` to build and attach the package to a release.
+
 ## Bridge mock workflow (for integration testing)
 
 Start bridge mock server:
