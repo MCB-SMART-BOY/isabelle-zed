@@ -1,94 +1,81 @@
 # Isabelle-Zed
 
-Isabelle support for Zed with two runtime options:
+Isabelle support for Zed with two runtime modes:
 
 ```text
-native mode (default):
+native mode (recommended):
   Zed Extension (WASM) -> isabelle vscode_server
 
-bridge mode:
+bridge mode (integration/testing):
   Zed Extension (WASM)
     -> isabelle-zed-lsp (Rust LSP proxy)
-    -> bridge (Rust NDJSON process/socket bridge)
-    -> scala-adapter (Scala mock or Isabelle-backed adapter)
+    -> bridge (Rust NDJSON bridge)
+    -> scala-adapter (mock or Isabelle-backed)
 ```
 
-## What currently works
+## Current status
 
-- `.thy` language registration in Zed extension manifest.
-- Native mode via official `isabelle vscode_server` (real PIDE-backed LSP).
-- Bridge-mode diagnostics pipeline (`didOpen`/`didChange`/`didSave` -> `document.push` -> diagnostics).
-- Bridge-mode hover pipeline (`textDocument/hover` -> `markup`).
-- Bridge mock mode and external adapter socket mode.
-- Mock end-to-end CI checks (NDJSON and LSP path).
+- Zed extension registers `.thy` and launches a language server.
+- Native mode is real Isabelle-backed through `isabelle vscode_server`.
+- Bridge mode supports diagnostics + hover through the NDJSON protocol.
+- Mock end-to-end checks exist for both NDJSON and LSP paths.
 
-## Build
+## Quick start (usable in Zed now)
+
+### 1. Build release artifacts
 
 ```bash
-make bridge-build
-make lsp-build
-make zed-build
+make release-build
 ```
 
-## Native mode smoke test
+### 2. Install as a dev extension in Zed
+
+1. Open Zed command palette.
+2. Run `zed: extensions`.
+3. Click `Install Dev Extension`.
+4. Select `.../isabelle-zed/zed-extension`.
+
+### 3. Configure Zed settings
+
+- Native mode example: `examples/zed-settings-native.json`
+- Bridge mock example: `examples/zed-settings-bridge-mock.json`
+
+Copy the JSON content into your Zed `settings.json`.
+
+### 4. Open a `.thy` file
+
+If native mode is active and `isabelle` is on `PATH`, diagnostics/hover are provided by Isabelle.
+
+## Bridge mock workflow (for integration testing)
+
+Start bridge mock server:
 
 ```bash
-make native-lsp-smoke
+make bridge-mock-up
 ```
 
-## Mock demo (bridge-mode LSP end-to-end)
-
-This verifies the same path Zed uses (LSP -> bridge):
+Run LSP end-to-end assertion:
 
 ```bash
 make mock-lsp-e2e
 ```
 
-## Mock demo (bridge + scala-adapter socket)
-
-### Terminal 1
+Stop bridge mock server:
 
 ```bash
-make mock-adapter
+make bridge-mock-down
 ```
 
-### Terminal 2
+## Other useful commands
 
 ```bash
-make mock-bridge-adapter
+make bridge-test
+make lsp-test
+make zed-check
+make native-lsp-smoke
 ```
 
-### Terminal 3
+## Real Isabelle-backed notes
 
-```bash
-make mock-send
-```
-
-Expected NDJSON response:
-
-```json
-{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}
-```
-
-## Use in Zed (dev extension)
-
-1. Build the local LSP binary:
-
-```bash
-cargo build --manifest-path isabelle-lsp/Cargo.toml --release
-```
-
-2. Build extension wasm:
-
-```bash
-cargo build --manifest-path zed-extension/Cargo.toml --target wasm32-wasip2 --release
-```
-
-3. In Zed, open `zed: extensions` -> `Install Dev Extension` -> select `zed-extension/`.
-4. Native mode (default) uses `isabelle vscode_server`; make sure `isabelle` is on `PATH`.
-5. For bridge mode, set `lsp.isabelle-lsp.settings.mode = "bridge"` and configure `binary.path` to `isabelle-zed-lsp` if needed.
-
-## Real Isabelle-backed mode
-
-- Native mode is already real Isabelle-backed through `isabelle vscode_server`.
-- Bridge mode keeps the custom protocol path for experimentation and integration testing.
+- Native mode is the default path for daily use in Zed.
+- Bridge mode remains available for custom protocol experiments and CI.

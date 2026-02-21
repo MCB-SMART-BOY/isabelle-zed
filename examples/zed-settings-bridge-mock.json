@@ -1,0 +1,16 @@
+{
+  "lsp": {
+    "isabelle-lsp": {
+      "binary": {
+        "path": "/absolute/path/to/isabelle-zed/isabelle-lsp/target/release/isabelle-zed-lsp"
+      },
+      "settings": {
+        "mode": "bridge",
+        "bridge_socket": "/tmp/isabelle.sock",
+        "session": "s1",
+        "bridge_autostart_command": "/absolute/path/to/isabelle-zed/bridge/target/release/bridge --mock --socket /tmp/isabelle.sock",
+        "bridge_autostart_timeout_ms": 10000
+      }
+    }
+  }
+}

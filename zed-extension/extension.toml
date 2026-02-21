@@ -4,7 +4,7 @@ version = "0.2.0"
 schema_version = 1
 authors = ["Isabelle-Zed Contributors"]
 description = "Isabelle language support powered by bridge + adapter"
-repository = "https://github.com/example/isabelle-zed"
+repository = "https://github.com/MCB-SMART-BOY/isabelle-zed"
 
 [grammars.isabelle]
 repository = "https://github.com/Giorbo/tree-sitter-sml"

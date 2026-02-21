@@ -1,0 +1,11 @@
+{
+  "lsp": {
+    "isabelle-lsp": {
+      "settings": {
+        "mode": "native",
+        "native_logic": "HOL",
+        "native_no_build": false
+      }
+    }
+  }
+}
