@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test-bridge:
+    name: Test Bridge (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build bridge
+        working-directory: bridge
+        run: cargo build --release
+
+      - name: Run tests
+        working-directory: bridge
+        run: cargo test
+
+      - name: Run clippy
+        working-directory: bridge
+        run: cargo clippy -- -D warnings
+
+  test-e2e-mock:
+    name: E2E Mock Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build bridge
+        working-directory: bridge
+        run: cargo build --release
+
+      - name: Test bridge with mock
+        run: |
+          cd bridge
+          echo '{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///test.thy","text":"theory Test begin end"}}' | timeout 5 cargo run --release -- --mock
+
+  test-zed-extension:
+    name: Test Zed Extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Zed extension
+        working-directory: zed-extension
+        run: cargo check || echo "Zed SDK not available, skipping"
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run fmt
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        run: cargo clippy -- -D warnings

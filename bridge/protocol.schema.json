@@ -1,0 +1,159 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Isabelle Bridge Protocol",
+  "description": "NDJSON message schema for Isabelle editor bridge",
+  "type": "object",
+  "required": ["id", "type", "payload"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique message identifier"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["document.push", "document.check", "diagnostics", "markup"],
+      "description": "Message type"
+    },
+    "session": {
+      "type": "string",
+      "description": "Session identifier"
+    },
+    "version": {
+      "type": "integer",
+      "description": "Document version"
+    },
+    "payload": {
+      "type": "object",
+      "description": "Message payload"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "type": {
+          "const": "document.push"
+        },
+        "payload": {
+          "type": "object",
+          "required": ["uri", "text"],
+          "properties": {
+            "uri": {
+              "type": "string",
+              "description": "Document URI"
+            },
+            "text": {
+              "type": "string",
+              "description": "Document content"
+            }
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "document.check"
+        },
+        "payload": {
+          "type": "object",
+          "required": ["uri", "version"],
+          "properties": {
+            "uri": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "diagnostics"
+        },
+        "payload": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["uri", "range", "severity", "message"],
+            "properties": {
+              "uri": {
+                "type": "string"
+              },
+              "range": {
+                "type": "object",
+                "required": ["start", "end"],
+                "properties": {
+                  "start": {
+                    "type": "object",
+                    "required": ["line", "col"],
+                    "properties": {
+                      "line": {
+                        "type": "integer"
+                      },
+                      "col": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "end": {
+                    "type": "object",
+                    "required": ["line", "col"],
+                    "properties": {
+                      "line": {
+                        "type": "integer"
+                      },
+                      "col": {
+                        "type": "integer"
+                      }
+                    }
+                  }
+                }
+              },
+              "severity": {
+                "type": "string",
+                "enum": ["error", "warning", "info"]
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "properties": {
+        "type": {
+          "const": "markup"
+        },
+        "payload": {
+          "type": "object",
+          "required": ["uri", "offset", "info"],
+          "properties": {
+            "uri": {
+              "type": "string"
+            },
+            "offset": {
+              "type": "object",
+              "required": ["line", "col"],
+              "properties": {
+                "line": {
+                  "type": "integer"
+                },
+                "col": {
+                  "type": "integer"
+                }
+              }
+            },
+            "info": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

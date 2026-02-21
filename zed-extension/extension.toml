@@ -1,0 +1,28 @@
+[extension]
+name = "isabelle-zed"
+id = "isabelle-zed"
+description = "Isabelle theorem prover support for Zed"
+version = "0.1.0"
+authors = ["Isabelle-Zed Contributors"]
+repository = "https://github.com/example/isabelle-zed"
+
+[language_provider]
+name = "Isabelle"
+file_extensions = ["thy"]
+
+[language_server]
+name = "isabelle-bridge"
+args = ["--socket", "/tmp/isabelle.sock"]
+
+[commands]
+isabelle-start-session = "Start Isabelle session"
+isabelle-stop-session = "Stop Isabelle session"
+isabelle-run-check = "Run document check"
+
+[language_server.capabilities]
+diagnostics = true
+hover = true
+completion = false
+
+[grammars]
+thy = "grammar"
