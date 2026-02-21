@@ -45,7 +45,14 @@ done
 
 if [ "$removed_any" -eq 0 ]; then
   echo "extension is not installed in: $extensions_dir"
+  if [ "${ISABELLE_ZED_SKIP_SHORTCUTS:-0}" != "1" ]; then
+    "$repo_root/scripts/uninstall_zed_shortcuts.sh"
+  fi
   exit 0
+fi
+
+if [ "${ISABELLE_ZED_SKIP_SHORTCUTS:-0}" != "1" ]; then
+  "$repo_root/scripts/uninstall_zed_shortcuts.sh"
 fi
 
 echo "Restart Zed (or reload extensions) to apply changes."

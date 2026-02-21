@@ -52,6 +52,7 @@ cp "$repo_root/zed-extension/target/wasm32-wasip2/release/isabelle_zed_extension
 
 cp "$repo_root/examples/zed-settings-native.json" "$package_dir/examples/"
 cp "$repo_root/examples/zed-settings-bridge-mock.json" "$package_dir/examples/"
+cp "$repo_root/examples/zed-keymap-isabelle.json" "$package_dir/examples/"
 cp "$repo_root/README.md" "$package_dir/docs/README.md"
 
 rm -f "$archive_path"

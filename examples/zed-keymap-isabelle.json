@@ -1,0 +1,22 @@
+[
+  {
+    "context": "Workspace",
+    "bindings": {
+      "alt-shift-i": [
+        "task::Spawn",
+        {
+          "task_name": "isabelle: check current theory (process_theories)",
+          "reveal_target": "center"
+        }
+      ],
+      "alt-shift-b": [
+        "task::Spawn",
+        {
+          "task_name": "isabelle: build worktree session (build -D)",
+          "reveal_target": "center"
+        }
+      ],
+      "alt-i": ["task::Rerun", { "reevaluate_context": true }]
+    }
+  }
+]

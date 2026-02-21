@@ -1,0 +1,21 @@
+[
+  {
+    "label": "isabelle: check current theory (process_theories)",
+    "command": "bash",
+    "args": [
+      "-lc",
+      "set -euo pipefail; theory=\"${ZED_FILENAME%.thy}\"; if [ \"$theory\" = \"$ZED_FILENAME\" ]; then echo \"Current file is not a .thy file: $ZED_FILENAME\" >&2; exit 1; fi; isabelle process_theories -D \"$ZED_DIRNAME\" -O \"$theory\""
+    ],
+    "cwd": "$ZED_DIRNAME",
+    "tags": ["isabelle-check"]
+  },
+  {
+    "label": "isabelle: build worktree session (build -D)",
+    "command": "bash",
+    "args": [
+      "-lc",
+      "set -euo pipefail; isabelle build -D \"$ZED_WORKTREE_ROOT\""
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]

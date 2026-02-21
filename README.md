@@ -29,11 +29,34 @@ make install-zed-native
 
 要求：`isabelle` 命令可在 `PATH` 中找到。
 
+该安装命令会同时安装 Isabelle 专用快捷键（写入 `keymap.json`，带标记块）。
+
 卸载：
 
 ```bash
 make uninstall-zed-native
 ```
+
+### 快捷键与可视化输出
+
+默认会安装以下快捷键：
+
+- `Alt-Shift-I`：检查当前 Theory（`process_theories`）
+- `Alt-Shift-B`：构建当前 worktree（`isabelle build -D`）
+- `Alt-I`：重跑上一次 Isabelle 任务
+
+单独安装/卸载快捷键：
+
+```bash
+make install-zed-shortcuts
+make uninstall-zed-shortcuts
+```
+
+可视化方式说明：
+
+- 诊断信息：使用 Zed 的标准 Diagnostics（红线、Problems）
+- 任务输出：显示在 Zed 终端/任务输出视图
+- 当前 Zed 扩展 API 无法提供自定义侧边 Proof 面板（后续 API 支持后可补）
 
 ### 可选配置示例
 
@@ -41,6 +64,7 @@ make uninstall-zed-native
 
 - `examples/zed-settings-native.json`
 - `examples/zed-settings-bridge-mock.json`
+- `examples/zed-keymap-isabelle.json`
 
 仅在你需要覆盖默认行为时使用。
 
@@ -125,11 +149,34 @@ Then restart Zed (or reload extensions) and open a `.thy` file.
 
 Requirement: `isabelle` must be available on `PATH`.
 
+This install command also installs Isabelle-specific shortcuts (inserted into `keymap.json` with marker comments).
+
 Uninstall:
 
 ```bash
 make uninstall-zed-native
 ```
+
+### Shortcuts and visual output
+
+Installed default shortcuts:
+
+- `Alt-Shift-I`: check current theory (`process_theories`)
+- `Alt-Shift-B`: build current worktree (`isabelle build -D`)
+- `Alt-I`: rerun the latest Isabelle task
+
+Install/uninstall shortcuts only:
+
+```bash
+make install-zed-shortcuts
+make uninstall-zed-shortcuts
+```
+
+Visual output model:
+
+- diagnostics: standard Zed diagnostics UI (squiggles/problems)
+- task output: Zed terminal/task output view
+- custom proof side panel is not currently possible with the public Zed extension API
 
 ### Optional settings examples
 
@@ -137,6 +184,7 @@ These files are at repository root:
 
 - `examples/zed-settings-native.json`
 - `examples/zed-settings-bridge-mock.json`
+- `examples/zed-keymap-isabelle.json`
 
 Use them only when you need custom overrides.
 

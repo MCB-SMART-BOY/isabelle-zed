@@ -11,6 +11,8 @@ SHELL := /bin/bash
 	 install-local \
 	 install-zed-native \
 	 uninstall-zed-native \
+	 install-zed-shortcuts \
+	 uninstall-zed-shortcuts \
 	 release-package \
 	 bridge-mock-up bridge-mock-down \
 	 mock-bridge mock-bridge-adapter mock-adapter mock-send mock-lsp-e2e \
@@ -60,6 +62,12 @@ install-zed-native:
 
 uninstall-zed-native:
 	./scripts/uninstall_zed_native.sh
+
+install-zed-shortcuts:
+	./scripts/install_zed_shortcuts.sh
+
+uninstall-zed-shortcuts:
+	./scripts/uninstall_zed_shortcuts.sh
 
 release-package:
 	./scripts/package_release.sh

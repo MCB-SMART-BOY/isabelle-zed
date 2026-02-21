@@ -91,4 +91,8 @@ else
   echo "warning: 'isabelle' not found in PATH. native mode will not start until PATH is fixed." >&2
 fi
 
+if [ "${ISABELLE_ZED_SKIP_SHORTCUTS:-0}" != "1" ]; then
+  "$repo_root/scripts/install_zed_shortcuts.sh"
+fi
+
 echo "Restart Zed (or reload extensions) and open a .thy file."
