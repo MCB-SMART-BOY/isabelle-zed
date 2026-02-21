@@ -46,6 +46,14 @@ if [ -z "$extension_id" ]; then
   echo "failed to read extension id from zed-extension/extension.toml" >&2
   exit 1
 fi
+if [[ ! "$extension_id" =~ ^[a-z0-9-]+$ ]]; then
+  echo "invalid extension id '$extension_id' (allowed: lowercase letters, numbers, hyphens)" >&2
+  exit 1
+fi
+if [[ "$extension_id" == zed-* || "$extension_id" == *-zed ]]; then
+  echo "invalid extension id '$extension_id' for Zed registry naming rules" >&2
+  exit 1
+fi
 
 echo "Building extension wasm (release)..."
 cargo build --manifest-path "$repo_root/zed-extension/Cargo.toml" --target wasm32-wasip2 --release
@@ -59,6 +67,13 @@ fi
 dest_dir="$extensions_dir/$extension_id"
 mkdir -p "$extensions_dir"
 rm -rf "$dest_dir"
+
+# Clean up previous local ID used during development.
+legacy_dir="$extensions_dir/isabelle-zed"
+if [ "$legacy_dir" != "$dest_dir" ] && [ -d "$legacy_dir" ]; then
+  rm -rf "$legacy_dir"
+fi
+
 mkdir -p "$dest_dir"
 
 cp "$repo_root/zed-extension/extension.toml" "$dest_dir/"

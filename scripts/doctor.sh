@@ -60,6 +60,18 @@ else
   warn "extension wasm artifact not found (run: make release-build)"
 fi
 
+if [ -f "$repo_root/LICENSE" ]; then
+  ok "repository license file is present"
+else
+  warn "repository license file is missing"
+fi
+
+if [ -f "$repo_root/zed-extension/LICENSE" ]; then
+  ok "zed-extension license file is present"
+else
+  warn "zed-extension license file is missing"
+fi
+
 if command -v isabelle >/dev/null 2>&1; then
   if isabelle version >/dev/null 2>&1; then
     ok "isabelle command runs successfully"

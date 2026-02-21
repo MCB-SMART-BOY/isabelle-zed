@@ -32,13 +32,20 @@ if [ -z "$extension_id" ]; then
   exit 1
 fi
 
-extension_dir="$extensions_dir/$extension_id"
+removed_any=0
 
-if [ ! -d "$extension_dir" ]; then
-  echo "extension is not installed at: $extension_dir"
+for candidate in "$extension_id" "isabelle-zed"; do
+  extension_dir="$extensions_dir/$candidate"
+  if [ -d "$extension_dir" ]; then
+    rm -rf "$extension_dir"
+    echo "Removed Zed extension: $extension_dir"
+    removed_any=1
+  fi
+done
+
+if [ "$removed_any" -eq 0 ]; then
+  echo "extension is not installed in: $extensions_dir"
   exit 0
 fi
 
-rm -rf "$extension_dir"
-echo "Removed Zed extension: $extension_dir"
 echo "Restart Zed (or reload extensions) to apply changes."

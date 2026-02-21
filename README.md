@@ -45,6 +45,30 @@ make uninstall-zed-native
 
 Use these only if you need custom behavior.
 
+## Submit to official Zed extensions
+
+Run the submission pre-check:
+
+```bash
+make zed-official-check
+```
+
+Then open a PR to `zed-industries/extensions` with:
+
+1. A new git submodule pointing to this repository at `extensions/isabelle`.
+2. A new entry in their `extensions.toml`:
+
+```toml
+[isabelle]
+submodule = "extensions/isabelle"
+path = "zed-extension"
+version = "<version-from-zed-extension/extension.toml>"
+```
+
+Detailed command-by-command guide:
+
+- `docs/official-submission.md`
+
 ## Local install helpers
 
 ### Doctor check

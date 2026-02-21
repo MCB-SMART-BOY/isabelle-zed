@@ -5,6 +5,7 @@ SHELL := /bin/bash
 	 scala-test \
 	 lsp-build lsp-test lsp-clippy \
 	 zed-build zed-check \
+	 zed-official-check \
 	 doctor \
 	 release-build \
 	 install-local \
@@ -41,6 +42,9 @@ zed-build:
 
 zed-check:
 	cargo check --manifest-path zed-extension/Cargo.toml
+
+zed-official-check:
+	./scripts/zed_official_check.sh
 
 doctor:
 	./scripts/doctor.sh

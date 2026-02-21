@@ -44,6 +44,17 @@ Use these only if you need custom overrides:
 - `examples/zed-settings-native.json`
 - `examples/zed-settings-bridge-mock.json`
 
+## Official registry submission
+
+From repo root, run:
+
+```bash
+make zed-official-check
+```
+
+The script prints the `extensions.toml` snippet to use in your PR to
+`zed-industries/extensions`.
+
 ## Release and packaging notes
 
 From repo root:
