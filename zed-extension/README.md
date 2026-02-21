@@ -1,20 +1,84 @@
-# Zed Isabelle Extension
+# Zed Isabelle Extension / Zed Isabelle 扩展
 
-This extension can run in two modes:
+## 中文（简体）
 
-- `native` (recommended): run `isabelle vscode_server` directly.
-- `bridge`: run `isabelle-zed-lsp`, which forwards to `bridge`.
+### 立即安装并使用（无需改 settings）
 
-## Install for immediate use (no settings edits)
-
-From repository root:
+在仓库根目录（`<repo-root>`）执行：
 
 ```bash
 make install-zed-native
 ```
 
-This installs the extension directly into Zed's local `installed` extensions directory.
-Default runtime mode is `native`, so no `settings.json` changes are required.
+脚本会把扩展安装到 Zed 本地扩展目录，扩展默认走 `native` 模式，无需手动编辑 `settings.json`。
+
+要求：`isabelle` 在 `PATH` 中可用。
+
+卸载：
+
+```bash
+make uninstall-zed-native
+```
+
+### 手动构建
+
+在仓库根目录执行：
+
+```bash
+cargo build --manifest-path isabelle-lsp/Cargo.toml --release
+cargo build --manifest-path zed-extension/Cargo.toml --target wasm32-wasip2 --release
+```
+
+或：
+
+```bash
+make release-build
+```
+
+### 可选设置示例
+
+示例文件在仓库根目录：
+
+- `examples/zed-settings-native.json`
+- `examples/zed-settings-bridge-mock.json`
+
+### 官方收录预检查
+
+```bash
+make zed-official-check
+```
+
+该命令会输出提交到 `zed-industries/extensions` 时可用的 `extensions.toml` 片段。
+
+### 发布与打包
+
+```bash
+make doctor
+make release-package
+```
+
+打包产物包含扩展清单与 wasm 文件，以及 `bridge` / `isabelle-zed-lsp` 二进制。
+
+### LSP 代理命令
+
+- `isabelle.start_session`
+- `isabelle.stop_session`
+- `isabelle.run_check`
+
+这些命令由 `isabelle-zed-lsp` 的 `workspace/executeCommand` 处理。
+
+## English
+
+### Install and use immediately (no settings edits)
+
+From repository root (`<repo-root>`):
+
+```bash
+make install-zed-native
+```
+
+The script installs the extension into Zed's local extension directory.
+Default mode is `native`, so no manual `settings.json` edits are required.
 
 Requirement: `isabelle` must be on `PATH`.
 
@@ -24,49 +88,46 @@ Uninstall:
 make uninstall-zed-native
 ```
 
-## Build manually
+### Manual build
+
+From repository root:
 
 ```bash
-cargo build --manifest-path ../isabelle-lsp/Cargo.toml --release
-cargo build --manifest-path Cargo.toml --target wasm32-wasip2 --release
+cargo build --manifest-path isabelle-lsp/Cargo.toml --release
+cargo build --manifest-path zed-extension/Cargo.toml --target wasm32-wasip2 --release
 ```
 
-Or from repo root:
+Or:
 
 ```bash
 make release-build
 ```
 
-## Optional settings examples
+### Optional settings examples
 
-Use these only if you need custom overrides:
+Example files are at repository root:
 
 - `examples/zed-settings-native.json`
 - `examples/zed-settings-bridge-mock.json`
 
-## Official registry submission
-
-From repo root, run:
+### Official registry pre-check
 
 ```bash
 make zed-official-check
 ```
 
-The script prints the `extensions.toml` snippet to use in your PR to
-`zed-industries/extensions`.
+This prints the `extensions.toml` snippet for your PR to `zed-industries/extensions`.
 
-## Release and packaging notes
-
-From repo root:
+### Release and packaging
 
 ```bash
 make doctor
 make release-package
 ```
 
-The package includes extension manifest + wasm artifact and `bridge`/`isabelle-zed-lsp` binaries.
+The package includes extension manifest + wasm artifact and `bridge` / `isabelle-zed-lsp` binaries.
 
-## Commands exposed by the LSP proxy
+### LSP proxy commands
 
 - `isabelle.start_session`
 - `isabelle.stop_session`

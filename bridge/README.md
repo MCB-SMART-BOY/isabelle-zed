@@ -1,50 +1,57 @@
-# Isabelle Bridge (MVP)
+# Isabelle Bridge (MVP) / Isabelle Bridge（MVP）
 
-`bridge` is a Rust NDJSON router between an editor client and an Isabelle Scala adapter process.
+## 中文（简体）
 
-## Build
+`bridge` 是 Rust 编写的 NDJSON 路由器，用于在编辑器与 Isabelle Scala 适配器之间转发消息。
+
+### 路径约定
+
+本页命令默认在 `bridge/` 目录执行。
+如果你在仓库根目录（`<repo-root>`）执行，请加上 `--manifest-path bridge/Cargo.toml`。
+
+### 构建
 
 ```bash
 cargo build --release
 ```
 
-## Run
+### 运行
 
-### Unix socket mode (recommended)
+Unix Socket 模式（推荐）：
 
 ```bash
 ./target/release/bridge --socket /tmp/isabelle.sock
 ```
 
-### Stdin/stdout mode
+Stdin/Stdout 模式：
 
 ```bash
 cat request.ndjson | ./target/release/bridge
 ```
 
-### Mock mode (CI / local deterministic testing)
+Mock 模式（CI / 本地可复现测试）：
 
 ```bash
 ./target/release/bridge --mock --socket /tmp/isabelle.sock
 ```
 
-### External Scala adapter socket mode
+外部 Scala 适配器 Socket 模式：
 
 ```bash
 ./target/release/bridge --socket /tmp/isabelle.sock --adapter-socket 127.0.0.1:9011
 ```
 
-## CLI flags
+### CLI 参数
 
-- `--socket <PATH>`: listen on a Unix socket (if omitted, bridge uses stdin/stdout)
-- `--isabelle-path <PATH>`: Isabelle executable path (default: `isabelle`)
-- `--adapter-socket <HOST:PORT>`: connect to an already-running adapter over TCP instead of spawning `isabelle scala`
-- `--debounce-ms <N>`: debounce window for `document.push` (default: `300`)
-- `--log-dir <PATH>`: directory for rotating debug logs
-- `--mock`: spawn a deterministic mock adapter subprocess instead of `isabelle scala`
-- `--debug`: enable debug-level logging and rotating log file output
+- `--socket <PATH>`：监听 Unix Socket；省略则走 stdin/stdout
+- `--isabelle-path <PATH>`：Isabelle 可执行路径，默认 `isabelle`
+- `--adapter-socket <HOST:PORT>`：连接外部已运行适配器（TCP）
+- `--debounce-ms <N>`：`document.push` 防抖窗口，默认 `300`
+- `--log-dir <PATH>`：调试日志目录
+- `--mock`：使用内置 mock adapter（不启动 `isabelle scala`）
+- `--debug`：启用 debug 日志并写入滚动日志文件
 
-## Protocol examples (exact)
+### 协议示例（精确）
 
 ```json
 {"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}
@@ -54,27 +61,110 @@ cat request.ndjson | ./target/release/bridge
 {"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}
 ```
 
-## Debug logging
-
-With `--debug`, all incoming/outgoing NDJSON lines are logged and written to a rotating file:
+### 调试日志
 
 ```bash
 ./target/release/bridge --mock --debug --log-dir /tmp/isabelle-bridge-logs --socket /tmp/isabelle.sock
 ```
 
-## CI one-liner (mock)
+### CI 一键命令（mock）
 
 ```bash
-cargo run --mock --socket /tmp/isabelle.sock
+cargo run -- --mock --socket /tmp/isabelle.sock
 ```
 
-Then from another shell:
+另一个终端发送请求：
 
 ```bash
 printf '%s\n' '{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}' | nc -U /tmp/isabelle.sock
 ```
 
-## Tests
+### 测试
+
+```bash
+cargo test
+```
+
+## English
+
+`bridge` is a Rust NDJSON router between an editor client and an Isabelle Scala adapter process.
+
+### Path convention
+
+Commands in this document assume you are in `bridge/`.
+If you run from repository root (`<repo-root>`), add `--manifest-path bridge/Cargo.toml`.
+
+### Build
+
+```bash
+cargo build --release
+```
+
+### Run
+
+Unix socket mode (recommended):
+
+```bash
+./target/release/bridge --socket /tmp/isabelle.sock
+```
+
+Stdin/stdout mode:
+
+```bash
+cat request.ndjson | ./target/release/bridge
+```
+
+Mock mode (CI / deterministic local testing):
+
+```bash
+./target/release/bridge --mock --socket /tmp/isabelle.sock
+```
+
+External Scala adapter socket mode:
+
+```bash
+./target/release/bridge --socket /tmp/isabelle.sock --adapter-socket 127.0.0.1:9011
+```
+
+### CLI flags
+
+- `--socket <PATH>`: listen on a Unix socket; if omitted uses stdin/stdout
+- `--isabelle-path <PATH>`: Isabelle executable path (default `isabelle`)
+- `--adapter-socket <HOST:PORT>`: connect to external running adapter over TCP
+- `--debounce-ms <N>`: debounce window for `document.push` (default `300`)
+- `--log-dir <PATH>`: directory for debug logs
+- `--mock`: use built-in mock adapter instead of spawning `isabelle scala`
+- `--debug`: enable debug logging and rotating debug file output
+
+### Protocol examples (exact)
+
+```json
+{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}
+```
+
+```json
+{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}
+```
+
+### Debug logging
+
+```bash
+./target/release/bridge --mock --debug --log-dir /tmp/isabelle-bridge-logs --socket /tmp/isabelle.sock
+```
+
+### CI one-liner (mock)
+
+```bash
+cargo run -- --mock --socket /tmp/isabelle.sock
+```
+
+Then send a request from another shell:
+
+```bash
+printf '%s\n' '{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}' | nc -U /tmp/isabelle.sock
+```
+
+### Tests
 
 ```bash
 cargo test

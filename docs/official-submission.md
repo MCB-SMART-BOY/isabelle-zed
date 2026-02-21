@@ -1,21 +1,22 @@
-# Official Zed Extension Submission Guide
+# Official Zed Extension Submission Guide / 官方 Zed 扩展提交流程
 
-This guide is for submitting this project to the official Zed extension registry in:
+## 中文（简体）
+
+本文档用于将本项目提交到官方扩展仓库：
 
 - https://github.com/zed-industries/extensions
 
-## 1. Pre-check this repository
+### 1. 在当前仓库执行预检查
 
-Run from this repository root:
+在 `<repo-root>` 执行：
 
 ```bash
 make zed-official-check
 ```
 
-This validates the extension ID and license files, and prints the expected
-`extensions.toml` snippet.
+该命令会检查：扩展 ID、许可证文件，以及官方仓库中是否已存在同名 ID。
 
-## 2. Fork and clone the official registry repository
+### 2. Fork 并克隆官方扩展仓库
 
 ```bash
 git clone https://github.com/<your-github-user>/extensions.git zed-extensions
@@ -23,37 +24,37 @@ cd zed-extensions
 git remote add upstream https://github.com/zed-industries/extensions.git
 ```
 
-## 3. Create a feature branch
+### 3. 创建功能分支
 
 ```bash
 git checkout -b add-isabelle-extension
 ```
 
-## 4. Add this repository as a submodule
+### 4. 添加本仓库为子模块
 
 ```bash
 git submodule add https://github.com/MCB-SMART-BOY/isabelle-zed.git extensions/isabelle
 ```
 
-## 5. Add registry entry in `extensions.toml`
+如果你的仓库地址不同，请替换成你自己的仓库 URL。
 
-Add this entry:
+### 5. 在 `extensions.toml` 增加条目
 
 ```toml
 [isabelle]
 submodule = "extensions/isabelle"
 path = "zed-extension"
-version = "0.2.0"
+version = "<read-from-zed-extension/extension.toml>"
 ```
 
-If needed, run sorting in the registry repo:
+需要排序时：
 
 ```bash
 pnpm install
 pnpm sort-extensions
 ```
 
-## 6. Commit and push
+### 6. 提交并推送
 
 ```bash
 git add .gitmodules extensions/isabelle extensions.toml
@@ -61,29 +62,110 @@ git commit -m "Add Isabelle extension"
 git push origin add-isabelle-extension
 ```
 
-## 7. Open PR to `zed-industries/extensions`
+### 7. 向 `zed-industries/extensions` 发 PR
 
-Open a PR from your fork branch into `zed-industries/extensions:main`.
+PR 描述建议包含：
 
-In the PR description include:
+- 扩展仓库地址
+- `path = "zed-extension"` 说明
+- 运行模式说明：默认 native 模式依赖 `isabelle vscode_server`
 
-- Extension repository URL.
-- Extension scope (`path = "zed-extension"`).
-- Runtime mode note: native mode uses `isabelle vscode_server`.
+### 8. 首次合并后的版本更新流程
 
-## 8. Updates after first merge
+1. 在本仓库更新 `zed-extension/extension.toml` 的 `version`
+2. 可选：打 tag / 发 release
+3. 在你的 `extensions` fork 中更新：
+   - `extensions/isabelle` 子模块提交
+   - `extensions.toml` 里的 `[isabelle]` 版本
+4. 再发一次更新 PR
 
-For future releases:
+### 注意事项
 
-1. Bump `zed-extension/extension.toml` version in this repository.
-2. Tag/release if desired.
-3. In your fork of `zed-industries/extensions`, update:
+- 扩展 ID 固定为 `isabelle`
+- 发布后不要改扩展 ID
+- 保持仓库根目录与 `zed-extension/` 下都有合法许可证文件
+
+## English
+
+Use this guide to submit this project to the official Zed extension registry:
+
+- https://github.com/zed-industries/extensions
+
+### 1. Run pre-check in this repository
+
+From `<repo-root>`:
+
+```bash
+make zed-official-check
+```
+
+This checks extension ID rules, license files, and duplicate ID against the official registry.
+
+### 2. Fork and clone the official registry repository
+
+```bash
+git clone https://github.com/<your-github-user>/extensions.git zed-extensions
+cd zed-extensions
+git remote add upstream https://github.com/zed-industries/extensions.git
+```
+
+### 3. Create a feature branch
+
+```bash
+git checkout -b add-isabelle-extension
+```
+
+### 4. Add this repository as a submodule
+
+```bash
+git submodule add https://github.com/MCB-SMART-BOY/isabelle-zed.git extensions/isabelle
+```
+
+Replace the URL if your extension repository lives elsewhere.
+
+### 5. Add entry to `extensions.toml`
+
+```toml
+[isabelle]
+submodule = "extensions/isabelle"
+path = "zed-extension"
+version = "<read-from-zed-extension/extension.toml>"
+```
+
+If sorting is needed:
+
+```bash
+pnpm install
+pnpm sort-extensions
+```
+
+### 6. Commit and push
+
+```bash
+git add .gitmodules extensions/isabelle extensions.toml
+git commit -m "Add Isabelle extension"
+git push origin add-isabelle-extension
+```
+
+### 7. Open PR to `zed-industries/extensions`
+
+Recommended PR notes:
+
+- Extension repository URL
+- Scope note: `path = "zed-extension"`
+- Runtime note: default native mode depends on `isabelle vscode_server`
+
+### 8. Update workflow after first merge
+
+1. Bump `version` in `zed-extension/extension.toml` in this repository
+2. Optional: create tag/release
+3. In your fork of `extensions`, update:
    - `extensions/isabelle` submodule commit
    - `[isabelle]` version in `extensions.toml`
-4. Open update PR.
+4. Open an update PR
 
-## Notes
+### Notes
 
-- Keep extension ID stable as `isabelle`.
-- Do not rename ID once published in official registry.
-- Keep accepted license files in both repository root and `zed-extension/`.
+- Keep extension ID stable as `isabelle`
+- Do not rename the extension ID after publishing
+- Keep valid license files in both repository root and `zed-extension/`
