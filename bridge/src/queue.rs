@@ -1,121 +1,135 @@
-use crate::protocol::{DocumentPushPayload, JsonMessage, MessageType};
-use parking_lot::RwLock;
+use crate::protocol::{Message, MessageType};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use thiserror::Error;
 
+#[derive(Debug, Error)]
+pub enum QueueError {
+    #[error("failed to parse document.push payload: {0}")]
+    InvalidPushPayload(String),
+}
+
+#[derive(Debug, Clone)]
+struct Pending {
+    message: Message,
+    queued_at: Instant,
+}
+
+#[derive(Debug)]
 pub struct DebounceQueue {
-    pending: Arc<RwLock<HashMap<String, (JsonMessage, Instant)>>>,
-    debounce_ms: u64,
-    tx: mpsc::Sender<JsonMessage>,
-    #[allow(dead_code)]
-    rx: mpsc::Receiver<JsonMessage>,
+    debounce: Duration,
+    pending_by_uri: HashMap<String, Pending>,
 }
 
 impl DebounceQueue {
     pub fn new(debounce_ms: u64) -> Self {
-        let (tx, rx) = mpsc::channel(100);
         Self {
-            pending: Arc::new(RwLock::new(HashMap::new())),
-            debounce_ms,
-            tx,
-            rx,
+            debounce: Duration::from_millis(debounce_ms),
+            pending_by_uri: HashMap::new(),
         }
     }
 
-    pub fn sender(&self) -> mpsc::Sender<JsonMessage> {
-        self.tx.clone()
-    }
+    pub fn enqueue(&mut self, message: Message) -> Result<(), QueueError> {
+        if message.msg_type != MessageType::DocumentPush {
+            return Ok(());
+        }
 
-    pub async fn run(&self) {
-        let debounce_duration = Duration::from_millis(self.debounce_ms);
-        
-        loop {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            
-            let now = Instant::now();
-            let mut to_send = Vec::new();
-            
-            {
-                let mut pending = self.pending.write();
-                let keys: Vec<String> = pending.keys().cloned().collect();
-                
-                for key in keys {
-                    if let Some((msg, time)) = pending.get(&key)
-                        && now.duration_since(*time) >= debounce_duration {
-                            to_send.push(msg.clone());
-                            pending.remove(&key);
-                        }
-                }
+        let payload = message
+            .push_payload()
+            .map_err(|err| QueueError::InvalidPushPayload(err.to_string()))?;
+
+        let queued_at = Instant::now();
+        match self.pending_by_uri.get_mut(&payload.uri) {
+            Some(existing) if existing.message.version > message.version => {
+                existing.queued_at = queued_at;
             }
-            
-            for msg in to_send {
-                debug!("Sending debounced message: {}", msg.id);
-                if self.tx.send(msg).await.is_err() {
-                    warn!("Receiver dropped");
-                    break;
-                }
+            Some(existing) => {
+                existing.message = message;
+                existing.queued_at = queued_at;
+            }
+            None => {
+                self.pending_by_uri
+                    .insert(payload.uri, Pending { message, queued_at });
             }
         }
+
+        Ok(())
     }
 
-    pub fn enqueue(&self, msg: JsonMessage) {
-        if msg.msg_type != MessageType::DocumentPush {
-            return;
-        }
-        
-        if let Ok(payload) = serde_json::from_value::<DocumentPushPayload>(msg.payload.clone()) {
-            let key = payload.uri;
-            debug!("Enqueuing message for {} (debounce {}ms)", key, self.debounce_ms);
-            self.pending.write().insert(key, (msg, Instant::now()));
-        }
-    }
-}
-
-pub fn merge_documents(messages: Vec<JsonMessage>) -> Option<JsonMessage> {
-    if messages.is_empty() {
-        return None;
-    }
-
-    let mut latest: Option<(usize, &JsonMessage)> = None;
-    
-    for (i, msg) in messages.iter().enumerate() {
-        if msg.msg_type == MessageType::DocumentPush
-            && (latest.is_none() || msg.version > latest.unwrap().1.version) {
-                latest = Some((i, msg));
+    pub fn drain_ready(&mut self, now: Instant) -> Vec<Message> {
+        let mut ready = Vec::new();
+        self.pending_by_uri.retain(|_, pending| {
+            if now.duration_since(pending.queued_at) >= self.debounce {
+                ready.push(pending.message.clone());
+                false
+            } else {
+                true
             }
+        });
+        ready
     }
-    
-    latest.map(|(_, msg)| msg.clone())
+
+    pub fn is_empty(&self) -> bool {
+        self.pending_by_uri.is_empty()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::protocol::create_document_push;
+    use super::DebounceQueue;
+    use crate::protocol::{Message, MessageType};
+    use std::time::{Duration, Instant};
 
-    #[tokio::test]
-    async fn test_debounce_queue() {
-        let queue = DebounceQueue::new(100);
-        let sender = queue.sender();
-        
-        let msg1 = create_document_push("file:///test.thy", "text1", "s1", 1);
-        let msg2 = create_document_push("file:///test.thy", "text2", "s1", 2);
-        
-        sender.send(msg1).await.unwrap();
-        sender.send(msg2).await.unwrap();
-        
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    fn push(uri: &str, version: i64, text: &str) -> Message {
+        Message {
+            id: format!("msg-{version:04}"),
+            msg_type: MessageType::DocumentPush,
+            session: "s1".to_string(),
+            version,
+            payload: serde_json::json!({
+                "uri": uri,
+                "text": text,
+            }),
+        }
     }
 
     #[test]
-    fn test_merge_documents() {
-        let msg1 = create_document_push("file:///test.thy", "text1", "s1", 1);
-        let msg2 = create_document_push("file:///test.thy", "text2", "s1", 2);
-        
-        let merged = merge_documents(vec![msg1.clone(), msg2.clone()]).unwrap();
-        assert_eq!(merged.version, Some(2));
+    fn debounce_keeps_latest_push_per_uri() {
+        let mut queue = DebounceQueue::new(300);
+        queue.enqueue(push("file:///a.thy", 1, "old")).unwrap();
+        queue.enqueue(push("file:///a.thy", 2, "new")).unwrap();
+
+        let ready = queue.drain_ready(Instant::now() + Duration::from_millis(350));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].version, 2);
+    }
+
+    #[test]
+    fn debounce_isolated_per_document_uri() {
+        let mut queue = DebounceQueue::new(300);
+        queue.enqueue(push("file:///a.thy", 1, "a")).unwrap();
+        queue.enqueue(push("file:///b.thy", 1, "b")).unwrap();
+
+        let ready = queue.drain_ready(Instant::now() + Duration::from_millis(350));
+        assert_eq!(ready.len(), 2);
+    }
+
+    #[test]
+    fn non_push_messages_are_ignored() {
+        let mut queue = DebounceQueue::new(300);
+        queue
+            .enqueue(Message {
+                id: "msg-0001".to_string(),
+                msg_type: MessageType::DocumentCheck,
+                session: "s1".to_string(),
+                version: 1,
+                payload: serde_json::json!({
+                    "uri": "file:///a.thy",
+                    "version": 1,
+                }),
+            })
+            .unwrap();
+
+        assert!(queue.is_empty());
     }
 }

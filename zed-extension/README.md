@@ -1,66 +1,76 @@
-# Isabelle Zed Extension
+# Zed Isabelle Extension
 
-Isabelle theorem prover support for the Zed code editor.
+This extension supports two runtime modes:
 
-## Installation
+- `native` (default): launch `isabelle vscode_server` directly.
+- `bridge`: launch `isabelle-zed-lsp` (Rust proxy), then forward to bridge/adapter.
 
-1. Build the extension:
-   ```bash
-   cargo build --release
-   ```
+Runtime chain (bridge mode):
 
-2. Load in Zed:
-   - Open Zed
-   - Run command: `extension: dev`
-   - Select the `zed-extension` directory
+```text
+Zed -> isabelle-zed-lsp -> bridge -> scala-adapter (mock or real Isabelle)
+```
 
-## Features
-
-- **Language Support**: `.thy` files (Isabelle theory files)
-- **Diagnostics**: Error/warning markers from Isabelle
-- **Hover**: Theorem information on mouse hover
-- **Commands**:
-  - `isabelle.start_session` - Start Isabelle session
-  - `isabelle.stop_session` - Stop Isabelle session
-  - `isabelle.run_check` - Run document check
-
-## Development
-
-### Prerequisites
-
-- Rust 1.70+
-- Zed (for loading the extension)
-
-### Build
+## Build extension
 
 ```bash
-cd zed-extension
-cargo build --release
+cargo build --manifest-path zed-extension/Cargo.toml --target wasm32-wasip2 --release
 ```
 
-### Testing
+## Build local language server proxy
 
 ```bash
-cargo test
+cargo build --manifest-path isabelle-lsp/Cargo.toml --release
 ```
 
-## Architecture
+## Zed dev setup
 
+1. Open `zed: extensions`.
+2. Click `Install Dev Extension`.
+3. Select this folder: `.../isabelle-zed/zed-extension`.
+4. Ensure `isabelle` is on `PATH` (native mode) or `isabelle-zed-lsp` is on `PATH` (bridge mode).
+
+Example Zed settings (`settings.json`):
+
+```json
+{
+  "lsp": {
+    "isabelle-lsp": {
+      "settings": {
+        "mode": "native",
+        "native_logic": "HOL",
+        "native_no_build": false
+      }
+    }
+  }
+}
 ```
-┌─────────────┐     NDJSON      ┌──────────┐     NDJSON      ┌──────────────┐
-│    Zed      │ ──────────────►│  Bridge  │ ──────────────►│ Scala Adapter│
-│  Extension  │◄──────────────│  (Rust)  │◄────────────────│   (Scala)    │
-└─────────────┘                └──────────┘                 └──────────────┘
-       │                              │                              │
-       │ Diagnostics                 │                              │
-       │◄───────────────────────────│                              │
+
+Bridge mode example:
+
+```json
+{
+  "lsp": {
+    "isabelle-lsp": {
+      "binary": {
+        "path": "/absolute/path/to/isabelle-zed-lsp"
+      },
+      "settings": {
+        "mode": "bridge",
+        "bridge_socket": "/tmp/isabelle.sock",
+        "session": "s1",
+        "bridge_autostart_command": "/absolute/path/to/bridge --socket /tmp/isabelle.sock --adapter-socket 127.0.0.1:9011",
+        "bridge_autostart_timeout_ms": 10000
+      }
+    }
+  }
+}
 ```
 
-## Configuration
+## Commands handled by bridge-mode LSP
 
-The extension connects to a Unix socket at `/tmp/isabelle.sock` by default.
+- `isabelle.start_session`
+- `isabelle.stop_session`
+- `isabelle.run_check`
 
-To configure:
-1. Start the bridge: `bridge --socket /tmp/isabelle.sock --mock`
-2. Start the Scala adapter (if using real Isabelle): `isabelle scala`
-3. Load the extension in Zed
+These are implemented in the LSP `workspace/executeCommand` handler.

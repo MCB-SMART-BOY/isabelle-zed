@@ -1,28 +1,18 @@
-[extension]
-name = "isabelle-zed"
 id = "isabelle-zed"
-description = "Isabelle theorem prover support for Zed"
-version = "0.1.0"
+name = "Isabelle"
+version = "0.2.0"
+schema_version = 1
 authors = ["Isabelle-Zed Contributors"]
+description = "Isabelle language support powered by bridge + adapter"
 repository = "https://github.com/example/isabelle-zed"
 
-[language_provider]
-name = "Isabelle"
-file_extensions = ["thy"]
+[grammars.isabelle]
+repository = "https://github.com/Giorbo/tree-sitter-sml"
+rev = "f56de7d96dd3b9bb8e0a529a647313b900817507"
 
-[language_server]
-name = "isabelle-bridge"
-args = ["--socket", "/tmp/isabelle.sock"]
+[language_servers.isabelle-lsp]
+name = "Isabelle Bridge LSP"
+languages = ["Isabelle"]
 
-[commands]
-isabelle-start-session = "Start Isabelle session"
-isabelle-stop-session = "Stop Isabelle session"
-isabelle-run-check = "Run document check"
-
-[language_server.capabilities]
-diagnostics = true
-hover = true
-completion = false
-
-[grammars]
-thy = "grammar"
+[language_servers.isabelle-lsp.language_ids]
+Isabelle = "isabelle"

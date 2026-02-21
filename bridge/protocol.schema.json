@@ -1,156 +1,139 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Isabelle Bridge Protocol",
-  "description": "NDJSON message schema for Isabelle editor bridge",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Isabelle Bridge NDJSON Protocol",
   "type": "object",
-  "required": ["id", "type", "payload"],
+  "required": ["id", "type", "session", "version", "payload"],
   "properties": {
     "id": {
-      "type": "string",
-      "description": "Unique message identifier"
+      "type": "string"
     },
     "type": {
       "type": "string",
-      "enum": ["document.push", "document.check", "diagnostics", "markup"],
-      "description": "Message type"
+      "enum": ["document.push", "document.check", "diagnostics", "markup"]
     },
     "session": {
-      "type": "string",
-      "description": "Session identifier"
+      "type": "string"
     },
     "version": {
-      "type": "integer",
-      "description": "Document version"
+      "type": "integer"
     },
-    "payload": {
-      "type": "object",
-      "description": "Message payload"
-    }
+    "payload": {}
   },
-  "oneOf": [
+  "additionalProperties": false,
+  "allOf": [
     {
-      "properties": {
-        "type": {
-          "const": "document.push"
-        },
-        "payload": {
-          "type": "object",
-          "required": ["uri", "text"],
-          "properties": {
-            "uri": {
-              "type": "string",
-              "description": "Document URI"
-            },
-            "text": {
-              "type": "string",
-              "description": "Document content"
-            }
-          }
-        }
-      }
-    },
-    {
-      "properties": {
-        "type": {
-          "const": "document.check"
-        },
-        "payload": {
-          "type": "object",
-          "required": ["uri", "version"],
-          "properties": {
-            "uri": {
-              "type": "string"
-            },
-            "version": {
-              "type": "integer"
-            }
-          }
-        }
-      }
-    },
-    {
-      "properties": {
-        "type": {
-          "const": "diagnostics"
-        },
-        "payload": {
-          "type": "array",
-          "items": {
+      "if": {
+        "properties": { "type": { "const": "document.push" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
             "type": "object",
-            "required": ["uri", "range", "severity", "message"],
+            "required": ["uri", "text"],
             "properties": {
-              "uri": {
-                "type": "string"
-              },
-              "range": {
-                "type": "object",
-                "required": ["start", "end"],
-                "properties": {
-                  "start": {
-                    "type": "object",
-                    "required": ["line", "col"],
-                    "properties": {
-                      "line": {
-                        "type": "integer"
+              "uri": { "type": "string" },
+              "text": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "document.check" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["uri", "version"],
+            "properties": {
+              "uri": { "type": "string" },
+              "version": { "type": "integer" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "diagnostics" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["uri", "range", "severity", "message"],
+              "properties": {
+                "uri": { "type": "string" },
+                "range": {
+                  "type": "object",
+                  "required": ["start", "end"],
+                  "properties": {
+                    "start": {
+                      "type": "object",
+                      "required": ["line", "col"],
+                      "properties": {
+                        "line": { "type": "integer" },
+                        "col": { "type": "integer" }
                       },
-                      "col": {
-                        "type": "integer"
-                      }
+                      "additionalProperties": false
+                    },
+                    "end": {
+                      "type": "object",
+                      "required": ["line", "col"],
+                      "properties": {
+                        "line": { "type": "integer" },
+                        "col": { "type": "integer" }
+                      },
+                      "additionalProperties": false
                     }
                   },
-                  "end": {
-                    "type": "object",
-                    "required": ["line", "col"],
-                    "properties": {
-                      "line": {
-                        "type": "integer"
-                      },
-                      "col": {
-                        "type": "integer"
-                      }
-                    }
-                  }
-                }
+                  "additionalProperties": false
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": ["error", "warning", "info"]
+                },
+                "message": { "type": "string" }
               },
-              "severity": {
-                "type": "string",
-                "enum": ["error", "warning", "info"]
-              },
-              "message": {
-                "type": "string"
-              }
+              "additionalProperties": false
             }
           }
         }
       }
     },
     {
-      "properties": {
-        "type": {
-          "const": "markup"
-        },
-        "payload": {
-          "type": "object",
-          "required": ["uri", "offset", "info"],
-          "properties": {
-            "uri": {
-              "type": "string"
-            },
-            "offset": {
-              "type": "object",
-              "required": ["line", "col"],
-              "properties": {
-                "line": {
-                  "type": "integer"
+      "if": {
+        "properties": { "type": { "const": "markup" } },
+        "required": ["type"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "type": "object",
+            "required": ["uri", "offset", "info"],
+            "properties": {
+              "uri": { "type": "string" },
+              "offset": {
+                "type": "object",
+                "required": ["line", "col"],
+                "properties": {
+                  "line": { "type": "integer" },
+                  "col": { "type": "integer" }
                 },
-                "col": {
-                  "type": "integer"
-                }
-              }
+                "additionalProperties": false
+              },
+              "info": { "type": "string" }
             },
-            "info": {
-              "type": "string"
-            }
+            "additionalProperties": false
           }
         }
       }

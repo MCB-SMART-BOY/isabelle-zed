@@ -1,194 +1,139 @@
 package isabelle.adapter
 
-import org.json4s._
-import org.json4s.native.Serialization
-import org.json4s.native.Serialization.{write, read}
-import org.json4s.DefaultFormats
+import io.circe.Decoder
+import io.circe.Encoder
+import io.circe.Json
+import io.circe.parser
+import io.circe.syntax.*
+import io.circe.generic.semiauto.*
 
-sealed trait MessageType
-case object DocumentPush extends MessageType
-case object DocumentCheck extends MessageType
-case object Diagnostics extends MessageType
-case object Markup extends MessageType
-case object Unknown extends MessageType
+object ProtocolModel {
+  val DocumentPushExample: String =
+    """{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\\nend\\n"}}"""
 
-object MessageType {
-  def fromString(s: String): MessageType = s match {
-    case "document.push" => DocumentPush
-    case "document.check" => DocumentCheck
-    case "diagnostics" => Diagnostics
-    case "markup" => Markup
-    case _ => Unknown
+  val DiagnosticsExample: String =
+    """{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}"""
+
+  sealed trait MessageType {
+    def value: String
   }
 
-  def toString(mt: MessageType): String = mt match {
-    case DocumentPush => "document.push"
-    case DocumentCheck => "document.check"
-    case Diagnostics => "diagnostics"
-    case Markup => "markup"
-    case Unknown => "unknown"
-  }
-}
+  object MessageType {
+    case object DocumentPush extends MessageType {
+      val value: String = "document.push"
+    }
+    case object DocumentCheck extends MessageType {
+      val value: String = "document.check"
+    }
+    case object Diagnostics extends MessageType {
+      val value: String = "diagnostics"
+    }
+    case object Markup extends MessageType {
+      val value: String = "markup"
+    }
 
-case class Position(line: Long, col: Long)
-
-case class Range(start: Position, end: Position)
-
-sealed trait DiagnosticSeverity
-case object Error extends DiagnosticSeverity
-case object Warning extends DiagnosticSeverity
-case object Info extends DiagnosticSeverity
-
-object DiagnosticSeverity {
-  def fromString(s: String): DiagnosticSeverity = s.toLowerCase match {
-    case "error" => Error
-    case "warning" => Warning
-    case "info" => Info
-    case _ => Error
-  }
-
-  def toString(ds: DiagnosticSeverity): String = ds match {
-    case Error => "error"
-    case Warning => "warning"
-    case Info => "info"
-  }
-}
-
-case class Diagnostic(
-  uri: String,
-  range: Range,
-  severity: String,
-  message: String
-)
-
-case class DocumentPushPayload(uri: String, text: String)
-
-case class DocumentCheckPayload(uri: String, version: Long)
-
-case class DiagnosticsPayload(diagnostics: List[Diagnostic])
-
-case class MarkupPayload(uri: String, offset: Position, info: String)
-
-case class JsonMessage(
-  id: String,
-  `type`: String,
-  session: Option[String] = None,
-  version: Option[Long] = None,
-  payload: JValue = JObject()
-)
-
-object JsonMessage {
-  implicit val formats: Formats = DefaultFormats
-
-  def parse(line: String): Option[JsonMessage] = {
-    try {
-      Some(read[JsonMessage](line))
-    } catch {
-      case e: Exception =>
-        System.err.println(s"Parse error: ${e.getMessage}")
-        None
+    def fromString(value: String): Either[String, MessageType] = value match {
+      case "document.push"  => Right(DocumentPush)
+      case "document.check" => Right(DocumentCheck)
+      case "diagnostics"    => Right(Diagnostics)
+      case "markup"         => Right(Markup)
+      case other             => Left(s"Unsupported message type: $other")
     }
   }
 
-  def serialize(msg: JsonMessage): String = {
-    write(msg) + "\n"
-  }
+  final case class Position(line: Int, col: Int)
+  final case class Range(start: Position, end: Position)
 
-  def createDocumentPush(uri: String, text: String, session: String, version: Long): JsonMessage = {
-    JsonMessage(
-      id = s"msg-${System.currentTimeMillis() % 10000}",
-      `type` = "document.push",
-      session = Some(session),
-      version = Some(version),
-      payload = JObject(
-        "uri" -> JString(uri),
-        "text" -> JString(text)
-      )
-    )
-  }
-
-  def createDiagnostics(
-    session: String,
-    version: Long,
-    diagnostics: List[Diagnostic]
-  ): JsonMessage = {
-    JsonMessage(
-      id = s"msg-${System.currentTimeMillis() % 10000}",
-      `type` = "diagnostics",
-      session = Some(session),
-      version = Some(version),
-      payload = JObject(
-        "diagnostics" -> JArray(diagnostics.map { d =>
-          JObject(
-            "uri" -> JString(d.uri),
-            "range" -> JObject(
-              "start" -> JObject("line" -> JInt(d.range.start.line), "col" -> JInt(d.range.start.col)),
-              "end" -> JObject("line" -> JInt(d.range.end.line), "col" -> JInt(d.range.end.col))
-            ),
-            "severity" -> JString(d.severity),
-            "message" -> JString(d.message)
-          )
-        })
-      )
-    )
-  }
-
-  def createMarkup(
+  final case class Diagnostic(
     uri: String,
-    offset: Position,
-    info: String,
+    range: Range,
+    severity: String,
+    message: String
+  )
+
+  final case class DocumentPushPayload(uri: String, text: String)
+  final case class DocumentCheckPayload(uri: String, version: Int)
+  final case class MarkupPayload(uri: String, offset: Position, info: String)
+
+  final case class Envelope(
+    id: String,
+    `type`: String,
     session: String,
-    version: Long
-  ): JsonMessage = {
-    JsonMessage(
-      id = s"msg-${System.currentTimeMillis() % 10000}",
-      `type` = "markup",
-      session = Some(session),
-      version = Some(version),
-      payload = JObject(
-        "uri" -> JString(uri),
-        "offset" -> JObject("line" -> JInt(offset.line), "col" -> JInt(offset.col)),
-        "info" -> JString(info)
-      )
+    version: Int,
+    payload: Json
+  )
+
+  sealed trait IncomingMessage {
+    def envelope: Envelope
+  }
+
+  final case class DocumentPushRequest(envelope: Envelope, payload: DocumentPushPayload)
+      extends IncomingMessage
+  final case class DocumentCheckRequest(envelope: Envelope, payload: DocumentCheckPayload)
+      extends IncomingMessage
+  final case class MarkupRequest(envelope: Envelope, payload: MarkupPayload)
+      extends IncomingMessage
+
+  given Encoder[Position] = deriveEncoder
+  given Decoder[Position] = deriveDecoder
+  given Encoder[Range] = deriveEncoder
+  given Decoder[Range] = deriveDecoder
+  given Encoder[Diagnostic] = deriveEncoder
+  given Decoder[Diagnostic] = deriveDecoder
+  given Encoder[DocumentPushPayload] = deriveEncoder
+  given Decoder[DocumentPushPayload] = deriveDecoder
+  given Encoder[DocumentCheckPayload] = deriveEncoder
+  given Decoder[DocumentCheckPayload] = deriveDecoder
+  given Encoder[MarkupPayload] = deriveEncoder
+  given Decoder[MarkupPayload] = deriveDecoder
+  given Encoder[Envelope] = deriveEncoder
+  given Decoder[Envelope] = deriveDecoder
+
+  def decodeEnvelope(line: String): Either[String, Envelope] =
+    parser.decode[Envelope](line).left.map(_.getMessage)
+
+  def decodeIncoming(envelope: Envelope): Either[String, IncomingMessage] =
+    MessageType.fromString(envelope.`type`).flatMap {
+      case MessageType.DocumentPush =>
+        envelope.payload
+          .as[DocumentPushPayload]
+          .left
+          .map(_.getMessage)
+          .map(DocumentPushRequest(envelope, _))
+      case MessageType.DocumentCheck =>
+        envelope.payload
+          .as[DocumentCheckPayload]
+          .left
+          .map(_.getMessage)
+          .map(DocumentCheckRequest(envelope, _))
+      case MessageType.Markup =>
+        envelope.payload
+          .as[MarkupPayload]
+          .left
+          .map(_.getMessage)
+          .map(MarkupRequest(envelope, _))
+      case MessageType.Diagnostics =>
+        Left("Incoming diagnostics messages are unsupported")
+    }
+
+  def encodeEnvelope(envelope: Envelope): String =
+    envelope.asJson.noSpaces
+
+  def diagnosticsResponse(envelope: Envelope, diagnostics: List[Diagnostic]): Envelope =
+    Envelope(
+      id = envelope.id,
+      `type` = MessageType.Diagnostics.value,
+      session = envelope.session,
+      version = envelope.version,
+      payload = diagnostics.asJson
     )
-  }
-}
 
-object PayloadParser {
-  def extractDocumentPush(payload: JValue): Option[DocumentPushPayload] = {
-    try {
-      Some(DocumentPushPayload(
-        uri = (payload \ "uri").extract[String],
-        text = (payload \ "text").extract[String]
-      ))
-    } catch {
-      case _: Exception => None
-    }
-  }
-
-  def extractDocumentCheck(payload: JValue): Option[DocumentCheckPayload] = {
-    try {
-      Some(DocumentCheckPayload(
-        uri = (payload \ "uri").extract[String],
-        version = (payload \ "version").extract[Long]
-      ))
-    } catch {
-      case _: Exception => None
-    }
-  }
-
-  def extractMarkupPayload(payload: JValue): Option[MarkupPayload] = {
-    try {
-      Some(MarkupPayload(
-        uri = (payload \ "uri").extract[String],
-        offset = Position(
-          line = (payload \ "offset" \ "line").extract[Long],
-          col = (payload \ "offset" \ "col").extract[Long]
-        ),
-        info = (payload \ "info").extract[String]
-      ))
-    } catch {
-      case _: Exception => None
-    }
-  }
+  def markupResponse(envelope: Envelope, uri: String, offset: Position, info: String): Envelope =
+    Envelope(
+      id = envelope.id,
+      `type` = MessageType.Markup.value,
+      session = envelope.session,
+      version = envelope.version,
+      payload = MarkupPayload(uri = uri, offset = offset, info = info).asJson
+    )
 }

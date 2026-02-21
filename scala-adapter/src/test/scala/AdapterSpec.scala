@@ -1,136 +1,98 @@
 package isabelle.adapter
 
-import org.json4s._
-import org.json4s.native.Serialization
-import org.json4s.native.Serialization.{write, read}
+import ProtocolModel.*
+
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
+import java.io.PrintWriter
+import scala.concurrent.Await
+import scala.concurrent.Future
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.ExecutionContext.Implicits.global
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
-import org.scalatestplus.mockito.MockitoSugar
-import org.mockito.Mockito._
 
-class AdapterSpec extends AnyFlatSpec with Matchers with MockitoSugar {
+class AdapterSpec extends AnyFlatSpec with Matchers {
 
-  implicit val formats = Serialization.formats(NoTypeHints)
+  "ProtocolModel" should "parse the canonical document.push and diagnostics examples" in {
+    val push = decodeEnvelope(DocumentPushExample)
+    push.isRight shouldBe true
 
-  "JsonMessage" should "parse document.push message" in {
-    val json = """{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}"""
-    
-    val msg = JsonMessage.parse(json)
-    
-    msg should not be None
-    msg.get.id should equal("msg-0001")
-    msg.get.`type` should equal("document.push")
-    msg.get.session should equal(Some("s1"))
-    msg.get.version should equal(Some(1))
+    val diagnostics = decodeEnvelope(DiagnosticsExample)
+    diagnostics.isRight shouldBe true
+    diagnostics.toOption.get.`type` shouldBe "diagnostics"
   }
 
-  it should "parse diagnostics message" in {
-    val json = """{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":{"diagnostics":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}}"""
-    
-    val msg = JsonMessage.parse(json)
-    
-    msg should not be None
-    msg.get.`type` should equal("diagnostics")
-  }
+  "AdapterMain" should "run in --mock mode and return diagnostics for document.push" in {
+    val adapterInput = new PipedInputStream()
+    val clientWriterStream = new PipedOutputStream(adapterInput)
 
-  it should "parse markup message" in {
-    val json = """{"id":"msg-0002","type":"markup","session":"s1","version":1,"payload":{"uri":"file:///test.thy","offset":{"line":5,"col":10},"info":"theorem foo: ..."}}"""
-    
-    val msg = JsonMessage.parse(json)
-    
-    msg should not be None
-    msg.get.`type` should equal("markup")
-  }
+    val adapterOutput = new PipedOutputStream()
+    val clientReaderStream = new PipedInputStream(adapterOutput)
 
-  "PayloadParser" should "extract DocumentPushPayload" in {
-    val payload = JObject(
-      "uri" -> JString("file:///test.thy"),
-      "text" -> JString("theory Test begin end")
-    )
-    
-    val result = PayloadParser.extractDocumentPush(payload)
-    
-    result should not be None
-    result.get.uri should equal("file:///test.thy")
-    result.get.text should equal("theory Test begin end")
-  }
-
-  it should "extract DocumentCheckPayload" in {
-    val payload = JObject(
-      "uri" -> JString("file:///test.thy"),
-      "version" -> JInt(5)
-    )
-    
-    val result = PayloadParser.extractDocumentCheck(payload)
-    
-    result should not be None
-    result.get.uri should equal("file:///test.thy")
-    result.get.version should equal(5)
-  }
-
-  it should "extract MarkupPayload" in {
-    val payload = JObject(
-      "uri" -> JString("file:///test.thy"),
-      "offset" -> JObject("line" -> JInt(10), "col" -> JInt(5)),
-      "info" -> JString("theorem foo")
-    )
-    
-    val result = PayloadParser.extractMarkupPayload(payload)
-    
-    result should not be None
-    result.get.uri should equal("file:///test.thy")
-    result.get.offset.line should equal(10)
-    result.get.offset.col should equal(5)
-  }
-
-  "MessageType" should "convert from string" in {
-    MessageType.fromString("document.push") should equal(DocumentPush)
-    MessageType.fromString("document.check") should equal(DocumentCheck)
-    MessageType.fromString("diagnostics") should equal(Diagnostics)
-    MessageType.fromString("markup") should equal(Markup)
-    MessageType.fromString("unknown") should equal(Unknown)
-  }
-
-  it should "convert to string" in {
-    MessageType.toString(DocumentPush) should equal("document.push")
-    MessageType.toString(DocumentCheck) should equal("document.check")
-    MessageType.toString(Diagnostics) should equal("diagnostics")
-    MessageType.toString(Markup) should equal("markup")
-  }
-
-  "JsonMessage.createDocumentPush" should "create valid message" in {
-    val msg = JsonMessage.createDocumentPush("file:///test.thy", "theory Test", "session1", 5)
-    
-    msg.id should not be empty
-    msg.`type` should equal("document.push")
-    msg.session should equal(Some("session1"))
-    msg.version should equal(Some(5))
-  }
-
-  "JsonMessage.createDiagnostics" should "create valid diagnostics message" in {
-    val diagnostics = List(
-      Diagnostic(
-        uri = "file:///test.thy",
-        range = Range(Position(1, 0), Position(1, 6)),
-        severity = "error",
-        message = "Parse error"
+    val runner = Future {
+      AdapterMain.runWithStreams(
+        config = AdapterMain.parseArgs(Array("--mock")),
+        input = adapterInput,
+        output = adapterOutput
       )
-    )
-    
-    val msg = JsonMessage.createDiagnostics("s1", 1, diagnostics)
-    
-    msg.id should not be empty
-    msg.`type` should equal("diagnostics")
-    msg.session should equal(Some("s1"))
-    msg.version should equal(Some(1))
+    }
+
+    val clientWriter = new PrintWriter(clientWriterStream, true)
+    val clientReader = new BufferedReader(new InputStreamReader(clientReaderStream))
+
+    clientWriter.println(DocumentPushExample)
+    clientWriter.flush()
+    clientWriter.close()
+
+    val responseLine = Await.result(Future(clientReader.readLine()), 1.second)
+    responseLine should not be null
+
+    val response = decodeEnvelope(responseLine)
+    response.isRight shouldBe true
+
+    val envelope = response.toOption.get
+    envelope.`type` shouldBe "diagnostics"
+    envelope.id shouldBe "msg-0001"
+    envelope.session shouldBe "s1"
+    envelope.version shouldBe 1
+
+    val diagnostics = envelope.payload.as[List[Diagnostic]]
+    diagnostics.isRight shouldBe true
+    diagnostics.toOption.get should have size 1
+    diagnostics.toOption.get.head.message shouldBe "Parse error"
+
+    Await.result(runner, 1.second)
   }
 
-  "JsonMessage.serialize" should "serialize and deserialize roundtrip" in {
-    val original = JsonMessage.createDocumentPush("file:///test.thy", "theory Test", "session1", 5)
-    val serialized = JsonMessage.serialize(original)
-    
-    serialized should include("document.push")
-    serialized should include("file:///test.thy")
-    serialized should include("\n")
+  it should "parse --logic argument" in {
+    val config = AdapterMain.parseArgs(Array("--logic=HOL", "--mock"))
+    config.logic shouldBe "HOL"
+    config.mock shouldBe true
+  }
+
+  "parseProcessTheoriesDiagnostics" should "extract line-based errors from process_theories output" in {
+    val output =
+      """Running Draft ...
+        |Draft FAILED (see also "isabelle build_log -H Error Draft")
+        |*** Outer syntax error (line 5 of "/tmp/Broken.thy"): proposition expected,
+        |*** but end-of-input (line 5 of "/tmp/Broken.thy") was found
+        |*** At command "<malformed>" (line 5 of "/tmp/Broken.thy")
+        |Unfinished session(s): Draft
+        |""".stripMargin
+
+    val diagnostics =
+      AdapterMain.parseProcessTheoriesDiagnostics(
+        uri = "file:///tmp/Broken.thy",
+        output = output,
+        exitCode = 1
+      )
+
+    diagnostics should not be empty
+    diagnostics.head.uri shouldBe "file:///tmp/Broken.thy"
+    diagnostics.head.range.start.line shouldBe 5
+    diagnostics.head.severity shouldBe "error"
   }
 }

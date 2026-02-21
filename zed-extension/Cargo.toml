@@ -1,20 +1,16 @@
 [package]
-name = "isabelle-zed"
+name = "isabelle-zed-extension"
 version = "0.1.0"
 edition = "2024"
-description = "Isabelle theorem prover support for Zed"
-authors = ["Isabelle-Zed Contributors"]
+description = "Zed extension wiring for Isabelle LSP bridge"
+
+[workspace]
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
-zed = "0.1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1.35", features = ["full"] }
-tracing = "0.1"
-thiserror = "1.0"
+zed_extension_api = "0.7.0"
 
 [profile.release]
 opt-level = 3

@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub const DOCUMENT_PUSH_EXAMPLE: &str = r#"{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}"#;
+pub const DIAGNOSTICS_EXAMPLE: &str = r#"{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}"#;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MessageType {
     #[serde(rename = "document.push")]
     DocumentPush,
@@ -10,184 +14,162 @@ pub enum MessageType {
     Diagnostics,
     #[serde(rename = "markup")]
     Markup,
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct JsonMessage {
+#[serde(deny_unknown_fields)]
+pub struct Message {
     pub id: String,
     #[serde(rename = "type")]
     pub msg_type: MessageType,
-    pub session: Option<String>,
-    pub version: Option<i64>,
+    pub session: String,
+    pub version: i64,
     pub payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct DocumentPushPayload {
     pub uri: String,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct DocumentCheckPayload {
     pub uri: String,
     pub version: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiagnosticsPayload {
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Diagnostic {
-    pub uri: String,
-    pub range: Range,
-    pub severity: DiagnosticSeverity,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Range {
-    pub start: Position,
-    pub end: Position,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Position {
-    pub line: u32,
-    pub col: u32,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-    Info,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MarkupPayload {
     pub uri: String,
     pub offset: Position,
     pub info: String,
 }
 
-pub fn parse_message(line: &str) -> Result<JsonMessage, serde_json::Error> {
-    serde_json::from_str(line)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Diagnostic {
+    pub uri: String,
+    pub range: Range,
+    pub severity: Severity,
+    pub message: String,
 }
 
-pub fn serialize_message(msg: &JsonMessage) -> Result<String, serde_json::Error> {
-    serde_json::to_string(msg).map(|s| s + "\n")
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
 }
 
-pub fn create_document_push(uri: &str, text: &str, session: &str, version: i64) -> JsonMessage {
-    JsonMessage {
-        id: format!("msg-{:04}", rand_id()),
-        msg_type: MessageType::DocumentPush,
-        session: Some(session.to_string()),
-        version: Some(version),
-        payload: serde_json::to_value(DocumentPushPayload {
-            uri: uri.to_string(),
-            text: text.to_string(),
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Position {
+    pub line: i64,
+    pub col: i64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Error)]
+pub enum ProtocolError {
+    #[error("invalid message JSON: {0}")]
+    InvalidJson(#[from] serde_json::Error),
+    #[error("payload decode error for {msg_type:?}: {source}")]
+    InvalidPayload {
+        msg_type: MessageType,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+pub fn parse_message(line: &str) -> Result<Message, ProtocolError> {
+    serde_json::from_str(line).map_err(ProtocolError::from)
+}
+
+pub fn to_ndjson(message: &Message) -> Result<String, ProtocolError> {
+    let mut serialized = serde_json::to_string(message)?;
+    serialized.push('\n');
+    Ok(serialized)
+}
+
+impl Message {
+    pub fn payload_as<T>(&self) -> Result<T, ProtocolError>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        serde_json::from_value(self.payload.clone()).map_err(|source| {
+            ProtocolError::InvalidPayload {
+                msg_type: self.msg_type,
+                source,
+            }
         })
-        .unwrap(),
+    }
+
+    pub fn diagnostics_payload(&self) -> Result<Vec<Diagnostic>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn push_payload(&self) -> Result<DocumentPushPayload, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn check_payload(&self) -> Result<DocumentCheckPayload, ProtocolError> {
+        self.payload_as()
     }
 }
 
-pub fn create_diagnostic(
+pub fn diagnostics_message_from_request(
+    request: &Message,
     uri: &str,
-    line: u32,
-    col: u32,
-    severity: DiagnosticSeverity,
+    severity: Severity,
     message: &str,
-) -> JsonMessage {
-    JsonMessage {
-        id: format!("msg-{:04}", rand_id()),
+) -> Result<Message, ProtocolError> {
+    let diagnostics = vec![Diagnostic {
+        uri: uri.to_string(),
+        range: Range {
+            start: Position { line: 1, col: 0 },
+            end: Position { line: 1, col: 6 },
+        },
+        severity,
+        message: message.to_string(),
+    }];
+
+    Ok(Message {
+        id: request.id.clone(),
         msg_type: MessageType::Diagnostics,
-        session: Some("s1".to_string()),
-        version: Some(1),
-        payload: serde_json::to_value(DiagnosticsPayload {
-            diagnostics: vec![Diagnostic {
-                uri: uri.to_string(),
-                range: Range {
-                    start: Position { line, col },
-                    end: Position { line, col: col + 5 },
-                },
-                severity,
-                message: message.to_string(),
-            }],
-        })
-        .unwrap(),
-    }
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(diagnostics)?,
+    })
 }
 
-fn rand_id() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u32
-        % 10000
-}
+pub fn markup_message_from_request(
+    request: &Message,
+    uri: &str,
+    offset: Position,
+    info: &str,
+) -> Result<Message, ProtocolError> {
+    let payload = MarkupPayload {
+        uri: uri.to_string(),
+        offset,
+        info: info.to_string(),
+    };
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_document_push_roundtrip() {
-        let json = r#"{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}"#;
-        let msg = parse_message(json).unwrap();
-        assert_eq!(msg.msg_type, MessageType::DocumentPush);
-        assert_eq!(msg.session, Some("s1".to_string()));
-
-        let serialized = serialize_message(&msg).unwrap();
-        let msg2 = parse_message(&serialized).unwrap();
-        assert_eq!(msg.id, msg2.id);
-    }
-
-    #[test]
-    fn test_diagnostics_roundtrip() {
-        let json = r#"{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":{"diagnostics":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}}"#;
-        let msg = parse_message(json).unwrap();
-        assert_eq!(msg.msg_type, MessageType::Diagnostics);
-
-        let serialized = serialize_message(&msg).unwrap();
-        assert!(serialized.contains("diagnostics"));
-    }
-
-    #[test]
-    fn test_markup_parsing() {
-        let json = r#"{"id":"msg-0002","type":"markup","session":"s1","version":1,"payload":{"uri":"file:///test.thy","offset":{"line":5,"col":10},"info":"theorem foo: ..."}}"#;
-        let msg = parse_message(json).unwrap();
-
-        assert_eq!(msg.msg_type, MessageType::Markup);
-    }
-
-    #[test]
-    fn test_invalid_json() {
-        let json = "not valid json";
-        let result = parse_message(json);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_unknown_type() {
-        let json =
-            r#"{"id":"msg-0001","type":"unknown.type","session":"s1","version":1,"payload":{}}"#;
-        let msg = parse_message(json).unwrap();
-        assert_eq!(msg.msg_type, MessageType::Unknown);
-    }
-
-    #[test]
-    fn test_create_document_push() {
-        let msg = create_document_push("file:///test.thy", "theory Test begin end", "session1", 5);
-        assert_eq!(msg.msg_type, MessageType::DocumentPush);
-        assert_eq!(msg.session, Some("session1".to_string()));
-        assert_eq!(msg.version, Some(5));
-    }
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::Markup,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(payload)?,
+    })
 }

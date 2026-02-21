@@ -1,170 +1,343 @@
-use crate::protocol::JsonMessage;
+use crate::protocol::{
+    Message, MessageType, Position, diagnostics_message_from_request, markup_message_from_request,
+    parse_message, to_ndjson,
+};
+use serde::Deserialize;
+use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, Mutex};
+use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-#[derive(Error, Debug)]
+#[derive(Debug, Clone)]
+enum AdapterMode {
+    SpawnReal { isabelle_path: String },
+    MockSubprocess,
+    Socket { address: String },
+}
+
+enum AdapterWriter {
+    Child(ChildStdin),
+    Socket(OwnedWriteHalf),
+}
+
+#[derive(Debug, Error)]
 pub enum ProcessError {
-    #[error("Failed to spawn process: {0}")]
-    SpawnError(String),
-    #[error("Process I/O error: {0}")]
-    IoError(#[from] std::io::Error),
-    #[error("Process exited: {0}")]
+    #[error("failed to spawn adapter process: {0}")]
+    Spawn(String),
+    #[error("failed to connect adapter socket: {0}")]
+    Connect(String),
+    #[error("adapter process is not running")]
+    NotRunning,
+    #[error("adapter process exited: {0}")]
     ProcessExited(String),
-    #[error("Protocol error: {0}")]
-    ProtocolError(String),
-    #[error("Max retries exceeded")]
-    MaxRetriesExceeded,
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    #[error("max retries exceeded after {retries} attempts; last error: {last_error}")]
+    MaxRetriesExceeded { retries: u32, last_error: String },
+    #[error("adapter output receiver has already been taken")]
+    OutputReceiverTaken,
 }
 
 pub struct ProcessManager {
-    isabelle_path: String,
-    mock_mode: bool,
+    mode: AdapterMode,
     max_retries: u32,
-    current_retry: u32,
-    child: Arc<Mutex<Option<Child>>>,
-    stdin: Arc<Mutex<Option<tokio::process::ChildStdin>>>,
-    running: Arc<Mutex<bool>>,
+    base_backoff_ms: u64,
+    child: Option<Child>,
+    writer: Option<AdapterWriter>,
+    output_tx: mpsc::Sender<String>,
+    output_rx: Option<mpsc::Receiver<String>>,
 }
 
 impl ProcessManager {
-    pub fn new(isabelle_path: String, mock_mode: bool) -> Self {
+    pub fn new(isabelle_path: String, mock_mode: bool, adapter_socket: Option<String>) -> Self {
+        let mode = if mock_mode {
+            AdapterMode::MockSubprocess
+        } else if let Some(address) = adapter_socket {
+            AdapterMode::Socket { address }
+        } else {
+            AdapterMode::SpawnReal { isabelle_path }
+        };
+
+        let (output_tx, output_rx) = mpsc::channel(256);
+
         Self {
-            isabelle_path,
-            mock_mode,
+            mode,
             max_retries: 3,
-            current_retry: 0,
-            child: Arc::new(Mutex::new(None)),
-            stdin: Arc::new(Mutex::new(None)),
-            running: Arc::new(Mutex::new(false)),
+            base_backoff_ms: 250,
+            child: None,
+            writer: None,
+            output_tx,
+            output_rx: Some(output_rx),
         }
     }
 
+    pub fn take_output_receiver(&mut self) -> Result<mpsc::Receiver<String>, ProcessError> {
+        self.output_rx
+            .take()
+            .ok_or(ProcessError::OutputReceiverTaken)
+    }
+
     pub async fn start(&mut self) -> Result<(), ProcessError> {
-        let mut cmd = if self.mock_mode {
-            let mut c = Command::new("cat");
-            c.stdout(Stdio::piped()).stdin(Stdio::piped());
-            c
-        } else {
-            let mut c = Command::new(&self.isabelle_path);
-            c.arg("scala").stdout(Stdio::piped()).stdin(Stdio::piped());
-            c
-        };
+        self.stop().await?;
 
-        info!("Starting Isabelle process: {:?}", cmd);
-        
-        let mut child = cmd.spawn().map_err(|e| ProcessError::SpawnError(e.to_string()))?;
-        
-        let stdin = child.stdin.take().ok_or_else(|| ProcessError::SpawnError("Failed to take stdin".to_string()))?;
-        let stdout = child.stdout.take().ok_or_else(|| ProcessError::SpawnError("Failed to take stdout".to_string()))?;
-
-        *self.child.lock().await = Some(child);
-        *self.stdin.lock().await = Some(stdin);
-        *self.running.lock().await = true;
-        self.current_retry = 0;
-
-        info!("Isabelle process started successfully");
-        
-        let stdout_reader = BufReader::new(stdout);
-        let (tx, _rx) = mpsc::channel::<String>(100);
-        
-        tokio::spawn(async move {
-            let mut lines = stdout_reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                debug!("Received: {}", line);
-                let _ = tx.send(line).await;
+        match self.mode.clone() {
+            AdapterMode::SpawnReal { isabelle_path } => {
+                let mut command = Command::new(isabelle_path);
+                command.arg("scala");
+                self.start_spawn(command).await
             }
-        });
+            AdapterMode::MockSubprocess => {
+                let current_exe: PathBuf =
+                    std::env::current_exe().map_err(|err| ProcessError::Spawn(err.to_string()))?;
+                let mut command = Command::new(current_exe);
+                command.arg("--mock-adapter");
+                self.start_spawn(command).await
+            }
+            AdapterMode::Socket { address } => self.start_socket(&address).await,
+        }
+    }
+
+    pub async fn send(&mut self, message: &Message) -> Result<(), ProcessError> {
+        let line = to_ndjson(message).map_err(|err| ProcessError::Protocol(err.to_string()))?;
+
+        let mut attempts = 0;
+        loop {
+            match self.write_line(&line).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    if attempts >= self.max_retries {
+                        return Err(ProcessError::MaxRetriesExceeded {
+                            retries: self.max_retries,
+                            last_error: err.to_string(),
+                        });
+                    }
+
+                    warn!(
+                        "adapter write failed (attempt {}/{}): {}",
+                        attempts + 1,
+                        self.max_retries,
+                        err
+                    );
+                    self.restart_with_backoff(attempts).await?;
+                    attempts += 1;
+                }
+            }
+        }
+    }
+
+    pub async fn stop(&mut self) -> Result<(), ProcessError> {
+        self.writer = None;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        Ok(())
+    }
+
+    async fn start_spawn(&mut self, mut command: Command) -> Result<(), ProcessError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        info!("starting adapter process: {:?}", command);
+        let mut child = command
+            .spawn()
+            .map_err(|err| ProcessError::Spawn(err.to_string()))?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ProcessError::Spawn("failed to acquire child stdin".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProcessError::Spawn("failed to acquire child stdout".to_string()))?;
+
+        self.writer = Some(AdapterWriter::Child(stdin));
+        self.child = Some(child);
+        self.spawn_output_reader(stdout);
 
         Ok(())
     }
 
-    pub async fn send(&mut self, msg: &JsonMessage) -> Result<(), ProcessError> {
-        let mut stdin_guard = self.stdin.lock().await;
-        if let Some(ref mut stdin) = *stdin_guard {
-            let line = crate::protocol::serialize_message(msg)
-                .map_err(|e| ProcessError::ProtocolError(e.to_string()))?;
-            debug!("Sending: {}", line.trim());
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await?;
-            Ok(())
-        } else {
-            Err(ProcessError::ProcessExited("Process not running".to_string()))
+    async fn start_socket(&mut self, address: &str) -> Result<(), ProcessError> {
+        info!("connecting to adapter socket: {address}");
+        let stream = TcpStream::connect(address)
+            .await
+            .map_err(|err| ProcessError::Connect(err.to_string()))?;
+        let (reader, writer) = stream.into_split();
+
+        self.writer = Some(AdapterWriter::Socket(writer));
+        self.child = None;
+        self.spawn_socket_output_reader(reader);
+        Ok(())
+    }
+
+    fn spawn_output_reader(&self, stdout: tokio::process::ChildStdout) {
+        let output_tx = self.output_tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if output_tx.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(err) => {
+                        error!("adapter stdout read error: {err}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn spawn_socket_output_reader(&self, reader: OwnedReadHalf) {
+        let output_tx = self.output_tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(reader).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if output_tx.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(err) => {
+                        error!("adapter socket read error: {err}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    async fn write_line(&mut self, line: &str) -> Result<(), ProcessError> {
+        if let Some(child) = self.child.as_mut()
+            && let Some(status) = child.try_wait()?
+        {
+            self.writer = None;
+            return Err(ProcessError::ProcessExited(status.to_string()));
+        }
+
+        match self.writer.as_mut() {
+            Some(AdapterWriter::Child(stdin)) => {
+                debug!("forwarding to adapter process: {}", line.trim_end());
+                stdin.write_all(line.as_bytes()).await?;
+                stdin.flush().await?;
+                Ok(())
+            }
+            Some(AdapterWriter::Socket(writer)) => {
+                debug!("forwarding to adapter socket: {}", line.trim_end());
+                writer.write_all(line.as_bytes()).await?;
+                writer.flush().await?;
+                Ok(())
+            }
+            None => Err(ProcessError::NotRunning),
         }
     }
 
-    pub async fn restart(&mut self) -> Result<(), ProcessError> {
-        self.stop().await;
-        
-        if self.current_retry >= self.max_retries {
-            error!("Max retries ({}) exceeded", self.max_retries);
-            return Err(ProcessError::MaxRetriesExceeded);
-        }
-
-        let backoff = Duration::from_millis(500 * 2u64.pow(self.current_retry));
-        warn!("Restarting process after {}ms (retry {}/{})", 
-              backoff.as_millis(), self.current_retry + 1, self.max_retries);
-        
-        tokio::time::sleep(backoff).await;
-        self.current_retry += 1;
-        
+    async fn restart_with_backoff(&mut self, attempt: u32) -> Result<(), ProcessError> {
+        let delay = Duration::from_millis(self.base_backoff_ms.saturating_mul(1_u64 << attempt));
+        self.stop().await?;
+        tokio::time::sleep(delay).await;
         self.start().await
     }
-
-    pub async fn stop(&mut self) {
-        *self.running.lock().await = false;
-        if let Some(mut child) = self.child.lock().await.take() {
-            let _ = child.kill().await;
-        }
-        *self.stdin.lock().await = None;
-        info!("Process stopped");
-    }
-
-    pub fn is_running(&self) -> bool {
-        false
-    }
 }
 
-pub struct ProcessHandle {
-    pub stdin: mpsc::Sender<String>,
-    pub stdout: mpsc::Receiver<String>,
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MarkupRequest {
+    uri: String,
+    offset: Position,
+    #[serde(default)]
+    info: Option<String>,
 }
 
-pub async fn spawn_mock_adapter() -> Result<ProcessHandle, ProcessError> {
-    let mut cmd = Command::new("cat");
-    cmd.stdout(Stdio::piped()).stdin(Stdio::piped());
-    
-    let mut child = cmd.spawn().map_err(|e| ProcessError::SpawnError(e.to_string()))?;
-    
-    let stdin = child.stdin.take().ok_or_else(|| ProcessError::SpawnError("No stdin".to_string()))?;
-    let stdout = child.stdout.take().ok_or_else(|| ProcessError::SpawnError("No stdout".to_string()))?;
-    
-    let (tx, rx) = mpsc::channel::<String>(100);
-    let (stx, mut srx) = mpsc::channel::<String>(100);
-    
-    let tx_clone = tx.clone();
-    tokio::spawn(async move {
-        let mut reader = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = reader.next_line().await {
-            let _ = tx_clone.send(line).await;
+pub async fn run_mock_adapter() -> Result<(), ProcessError> {
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+
+    let mut input = BufReader::new(stdin).lines();
+    let mut output = tokio::io::BufWriter::new(stdout);
+
+    while let Some(line) = input.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
         }
-    });
-    
-    tokio::spawn(async move {
-        let mut stdin = stdin;
-        while let Some(line) = srx.recv().await {
-            let _ = stdin.write_all(format!("{}\n", line).as_bytes()).await;
-            let _ = stdin.flush().await;
-        }
-    });
-    
-    Ok(ProcessHandle {
-        stdin: stx,
-        stdout: rx,
-    })
+
+        let request = match parse_message(&line) {
+            Ok(message) => message,
+            Err(err) => {
+                warn!("mock adapter received invalid JSON: {err}");
+                continue;
+            }
+        };
+
+        let response = match request.msg_type {
+            MessageType::DocumentPush => {
+                let payload = match request.push_payload() {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        warn!("mock adapter invalid document.push payload: {err}");
+                        continue;
+                    }
+                };
+                diagnostics_message_from_request(
+                    &request,
+                    &payload.uri,
+                    crate::protocol::Severity::Error,
+                    "Parse error",
+                )
+                .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::DocumentCheck => {
+                let payload = match request.check_payload() {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        warn!("mock adapter invalid document.check payload: {err}");
+                        continue;
+                    }
+                };
+                diagnostics_message_from_request(
+                    &request,
+                    &payload.uri,
+                    crate::protocol::Severity::Error,
+                    "Parse error",
+                )
+                .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::Markup => {
+                let payload: MarkupRequest = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let info = payload
+                    .info
+                    .unwrap_or_else(|| "Mock hover information".to_string());
+                markup_message_from_request(&request, &payload.uri, payload.offset, &info)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::Diagnostics => {
+                continue;
+            }
+        };
+
+        let line = to_ndjson(&response).map_err(|err| ProcessError::Protocol(err.to_string()))?;
+        debug!("mock adapter -> bridge: {}", line.trim_end());
+        output.write_all(line.as_bytes()).await?;
+        output.flush().await?;
+    }
+
+    Ok(())
 }

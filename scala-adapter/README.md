@@ -1,6 +1,10 @@
-# Isabelle Scala Adapter
+# Isabelle Scala Adapter (MVP)
 
-NDJSON adapter that communicates with the Isabelle/PIDE system.
+`scala-adapter` is a long-running NDJSON process that translates editor requests into diagnostics/markup responses. It supports:
+
+- `stdin/stdout` transport (default)
+- `--socket=<host>:<port>` transport
+- deterministic `--mock` mode for CI
 
 ## Build
 
@@ -10,67 +14,63 @@ sbt compile
 
 ## Run
 
-### Mock Mode (for CI/testing)
+### Mock mode (CI / local deterministic)
 
 ```bash
 sbt "run --mock"
 ```
 
-### Stdin/Stdout Mode
+### Real mode (Isabelle-backed via process_theories)
 
 ```bash
-sbt run
+sbt "run --isabelle-path=isabelle"
 ```
 
-### Socket Mode
+Optional logic image:
 
 ```bash
-sbt "run --socket=localhost:9876"
+sbt "run --isabelle-path=isabelle --logic=HOL"
 ```
 
-## Protocol
+### Socket mode
 
-### Input Messages
+```bash
+sbt "run --mock --socket=127.0.0.1:9011"
+```
 
-**document.push**
+## Protocol examples (exact)
+
 ```json
 {"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}
 ```
 
-**document.check**
 ```json
-{"id":"msg-0002","type":"document.check","session":"s1","version":1,"payload":{"uri":"file:///test.thy","version":1}}
+{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}
 ```
 
-**markup**
-```json
-{"id":"msg-0003","type":"markup","session":"s1","version":1,"payload":{"uri":"file:///test.thy","offset":{"line":5,"col":10},"info":""}}
+## Bridge wiring
+
+Use stdio transport between bridge and adapter:
+
+1. Start adapter (mock):
+
+```bash
+cd scala-adapter
+sbt "run --mock"
 ```
 
-### Output Messages
+2. Start bridge in non-mock mode (so it launches `isabelle scala` command path you provide) or use bridge mock when testing bridge only.
 
-**diagnostics**
-```json
-{"id":"msg-0004","type":"diagnostics","session":"s1","version":1,"payload":{"diagnostics":[{"uri":"file:///test.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}}
-```
-
-## Test
+## Testing
 
 ```bash
 sbt test
 ```
 
-## Architecture
+The test suite runs `AdapterMain` in `--mock` mode with piped streams and verifies a full `document.push -> diagnostics` roundtrip.
 
-This adapter is designed to work with the PIDE framework (Prover IDE).
+## Backend notes
 
-References:
-- Wenzel, Makarius. "Isabelle/jEdit — a Prover IDE within the PIDE framework." (2012)
-- Isabelle System Manual: https://isabelle.in.tum.de/doc/system.pdf
-
-## Dependencies
-
-- Scala 3.4.0
-- sbt 1.9.9
-- json4s-native 4.0.6
-- json4s-jackson 4.0.6
+- `--mock`: deterministic CI mode (`Parse error` diagnostics).
+- real mode: checks pushed theory text via `isabelle process_theories -D <tmp> -O <Theory>`.
+- hover in real mode currently returns a placeholder info string.

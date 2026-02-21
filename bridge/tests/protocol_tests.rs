@@ -1,69 +1,59 @@
-use bridge::protocol::*;
+use bridge::protocol::{
+    DIAGNOSTICS_EXAMPLE, DOCUMENT_PUSH_EXAMPLE, Diagnostic, DocumentPushPayload, MessageType,
+    Severity, parse_message, to_ndjson,
+};
 
 #[test]
-fn test_document_push_parsing() {
-    let json = r#"{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}"#;
-    let msg = parse_message(json).unwrap();
+fn document_push_parses_exact_example() {
+    let message = parse_message(DOCUMENT_PUSH_EXAMPLE).expect("document.push example should parse");
+    assert_eq!(message.id, "msg-0001");
+    assert_eq!(message.msg_type, MessageType::DocumentPush);
+    assert_eq!(message.session, "s1");
+    assert_eq!(message.version, 1);
 
-    assert_eq!(msg.id, "msg-0001");
-    assert_eq!(msg.msg_type, MessageType::DocumentPush);
-    assert_eq!(msg.session, Some("s1".to_string()));
-    assert_eq!(msg.version, Some(1));
-
-    let payload: DocumentPushPayload = serde_json::from_value(msg.payload).unwrap();
+    let payload: DocumentPushPayload = message.push_payload().expect("payload should decode");
     assert_eq!(payload.uri, "file:///home/user/example.thy");
-    assert!(payload.text.contains("theory Example"));
+    assert!(payload.text.contains("theory Example imports Main begin"));
 }
 
 #[test]
-fn test_diagnostics_parsing() {
-    let json = r#"{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":{"diagnostics":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}}"#;
-    let msg = parse_message(json).unwrap();
+fn diagnostics_parses_exact_example() {
+    let message = parse_message(DIAGNOSTICS_EXAMPLE).expect("diagnostics example should parse");
+    assert_eq!(message.msg_type, MessageType::Diagnostics);
 
-    assert_eq!(msg.msg_type, MessageType::Diagnostics);
-
-    let payload: DiagnosticsPayload = serde_json::from_value(msg.payload).unwrap();
-    assert_eq!(payload.diagnostics.len(), 1);
-
-    let diag = &payload.diagnostics[0];
-    assert_eq!(diag.severity, DiagnosticSeverity::Error);
-    assert_eq!(diag.message, "Parse error");
-    assert_eq!(diag.range.start.line, 1);
+    let payload: Vec<Diagnostic> = message
+        .diagnostics_payload()
+        .expect("diagnostics payload should decode");
+    assert_eq!(payload.len(), 1);
+    assert_eq!(payload[0].severity, Severity::Error);
+    assert_eq!(payload[0].message, "Parse error");
+    assert_eq!(payload[0].range.start.line, 1);
+    assert_eq!(payload[0].range.end.col, 6);
 }
 
 #[test]
-fn test_markup_parsing() {
-    let json = r#"{"id":"msg-0002","type":"markup","session":"s1","version":1,"payload":{"uri":"file:///test.thy","offset":{"line":5,"col":10},"info":"theorem foo: ..."}}"#;
-    let msg = parse_message(json).unwrap();
+fn message_round_trip_ndjson() {
+    let message = parse_message(DOCUMENT_PUSH_EXAMPLE).expect("message should parse");
+    let ndjson = to_ndjson(&message).expect("message should serialize to ndjson");
 
-    assert_eq!(msg.msg_type, MessageType::Markup);
-
-    let payload: MarkupPayload = serde_json::from_value(msg.payload).unwrap();
-    assert_eq!(payload.offset.line, 5);
-    assert_eq!(payload.info, "theorem foo: ...");
+    assert!(ndjson.ends_with('\n'));
+    let reparsed = parse_message(ndjson.trim_end()).expect("ndjson should parse back");
+    assert_eq!(reparsed, message);
 }
 
 #[test]
-fn test_invalid_json() {
-    let json = "not valid json";
-    let result = parse_message(json);
-    assert!(result.is_err());
+fn missing_fields_fail_with_clear_error() {
+    let invalid = r#"{"id":"msg-0001","type":"document.push","payload":{"uri":"file:///x.thy"}}"#;
+    let error = parse_message(invalid).expect_err("missing fields must fail");
+    let text = error.to_string();
+    assert!(text.contains("invalid message JSON"));
+    assert!(text.contains("missing field"));
 }
 
 #[test]
-fn test_missing_required_fields() {
-    let json = r#"{"id":"msg-0001"}"#;
-    let msg: Result<JsonMessage, _> = parse_message(json);
-    assert!(msg.is_err());
-}
-
-#[test]
-fn test_roundtrip_serialization() {
-    let original = r#"{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///test.thy","text":"test"}}"#;
-    let msg = parse_message(original).unwrap();
-    let serialized = serialize_message(&msg).unwrap();
-    let msg2 = parse_message(&serialized).unwrap();
-
-    assert_eq!(msg.id, msg2.id);
-    assert_eq!(msg.msg_type, msg2.msg_type);
+fn invalid_type_fails() {
+    let invalid =
+        r#"{"id":"msg-0001","type":"document.unknown","session":"s1","version":1,"payload":{}}"#;
+    let error = parse_message(invalid).expect_err("unknown message types must fail");
+    assert!(error.to_string().contains("invalid message JSON"));
 }

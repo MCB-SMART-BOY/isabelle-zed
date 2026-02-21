@@ -1,226 +1,336 @@
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tracing::{debug, info};
+use std::collections::HashMap;
+use zed_extension_api::{self as zed, LanguageServerId, serde_json::Value, settings::LspSettings};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Position {
-    pub line: u32,
-    pub col: u32,
+const ISABELLE_LANGUAGE_SERVER_ID: &str = "isabelle-lsp";
+
+const DEFAULT_NATIVE_BINARY: &str = "isabelle";
+const DEFAULT_BRIDGE_BINARY: &str = "isabelle-zed-lsp";
+
+const DEFAULT_BRIDGE_SOCKET: &str = "/tmp/isabelle.sock";
+const DEFAULT_SESSION: &str = "s1";
+
+const ENV_BRIDGE_SOCKET: &str = "ISABELLE_BRIDGE_SOCKET";
+const ENV_SESSION: &str = "ISABELLE_SESSION";
+const ENV_BRIDGE_AUTOSTART_CMD: &str = "ISABELLE_BRIDGE_AUTOSTART_CMD";
+const ENV_BRIDGE_AUTOSTART_TIMEOUT_MS: &str = "ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS";
+
+const SETTINGS_KEY_MODE: &str = "mode";
+const SETTINGS_KEY_BRIDGE_SOCKET: &str = "bridge_socket";
+const SETTINGS_KEY_SESSION: &str = "session";
+const SETTINGS_KEY_BRIDGE_AUTOSTART_COMMAND: &str = "bridge_autostart_command";
+const SETTINGS_KEY_BRIDGE_AUTOSTART_TIMEOUT_MS: &str = "bridge_autostart_timeout_ms";
+const SETTINGS_KEY_NATIVE_LOGIC: &str = "native_logic";
+const SETTINGS_KEY_NATIVE_NO_BUILD: &str = "native_no_build";
+const SETTINGS_KEY_NATIVE_SESSION_DIRS: &str = "native_session_dirs";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServerMode {
+    Native,
+    Bridge,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Range {
-    pub start: Position,
-    pub end: Position,
-}
+struct IsabelleExtension;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DiagnosticSeverity {
-    Error,
-    Warning,
-    Info,
-}
+impl IsabelleExtension {
+    fn resolve_language_server_command(
+        &self,
+        worktree: &zed::Worktree,
+        lsp_settings: Option<LspSettings>,
+    ) -> zed::Command {
+        let (binary, settings_json) = match lsp_settings {
+            Some(settings) => (settings.binary, settings.settings),
+            None => (None, None),
+        };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Diagnostic {
-    pub uri: String,
-    pub range: Range,
-    pub severity: DiagnosticSeverity,
-    pub message: String,
-}
+        let mode = mode_from_settings(&settings_json);
+        let command = resolve_command_path(worktree, mode, binary.as_ref());
+        let args = resolve_command_args(mode, binary.as_ref(), &settings_json);
+        let env = resolve_environment(worktree, mode, binary.as_ref(), &settings_json);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DocumentPushPayload {
-    pub uri: String,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MarkupPayload {
-    pub uri: String,
-    pub offset: Position,
-    #[serde(default)]
-    pub info: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JsonMessage {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub msg_type: String,
-    #[serde(default)]
-    pub session: Option<String>,
-    #[serde(default)]
-    pub version: Option<i64>,
-    #[serde(default)]
-    pub payload: serde_json::Value,
-}
-
-impl JsonMessage {
-    pub fn parse(line: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(line)
-    }
-
-    pub fn serialize(&self) -> Result<String, serde_json::Error> {
-        serde_json::to_string(self).map(|s| s + "\n")
-    }
-
-    pub fn create_document_push(uri: &str, text: &str, session: &str, version: i64) -> Self {
-        Self {
-            id: format!("msg-{}", rand_id()),
-            msg_type: "document.push".to_string(),
-            session: Some(session.to_string()),
-            version: Some(version),
-            payload: serde_json::to_value(DocumentPushPayload {
-                uri: uri.to_string(),
-                text: text.to_string(),
-            })
-            .unwrap(),
-        }
-    }
-
-    pub fn create_markup(uri: &str, line: u32, col: u32, session: &str, version: i64) -> Self {
-        Self {
-            id: format!("msg-{}", rand_id()),
-            msg_type: "markup".to_string(),
-            session: Some(session.to_string()),
-            version: Some(version),
-            payload: serde_json::to_value(MarkupPayload {
-                uri: uri.to_string(),
-                offset: Position { line, col },
-                info: String::new(),
-            })
-            .unwrap(),
-        }
+        zed::Command { command, args, env }
     }
 }
 
-fn rand_id() -> u32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u32
-        % 10000
-}
-
-pub struct IsabelleBridge {
-    socket_path: String,
-    session: String,
-    version: i64,
-    stream: Option<UnixStream>,
-}
-
-impl IsabelleBridge {
-    pub fn new(socket_path: &str) -> Self {
-        Self {
-            socket_path: socket_path.to_string(),
-            session: "s1".to_string(),
-            version: 1,
-            stream: None,
-        }
+impl zed::Extension for IsabelleExtension {
+    fn new() -> Self {
+        Self
     }
 
-    pub async fn connect(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        info!("Connecting to socket: {}", self.socket_path);
-        let stream = UnixStream::connect(&self.socket_path).await?;
-        self.stream = Some(stream);
-        Ok(())
-    }
-
-    pub async fn push_document(&mut self, uri: &str, text: &str) -> Result<Vec<Diagnostic>, Box<dyn std::error::Error + Send + Sync>> {
-        if self.stream.is_none() {
-            self.connect().await?;
+    fn language_server_command(
+        &mut self,
+        language_server_id: &LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> zed::Result<zed::Command> {
+        if language_server_id.as_ref() != ISABELLE_LANGUAGE_SERVER_ID {
+            return Err(format!(
+                "unsupported language server id: {}",
+                language_server_id.as_ref()
+            ));
         }
 
-        let msg = JsonMessage::create_document_push(uri, text, &self.session, self.version);
-        self.version += 1;
+        let lsp_settings = LspSettings::for_worktree(language_server_id.as_ref(), worktree).ok();
+        Ok(self.resolve_language_server_command(worktree, lsp_settings))
+    }
 
-        if let Some(ref mut stream) = self.stream {
-            stream.write_all(msg.serialize()?.as_bytes()).await?;
-            stream.flush().await?;
+    fn language_server_workspace_configuration(
+        &mut self,
+        language_server_id: &LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> zed::Result<Option<zed::serde_json::Value>> {
+        let settings = LspSettings::for_worktree(language_server_id.as_ref(), worktree)
+            .ok()
+            .and_then(|settings| settings.settings)
+            .and_then(strip_control_settings);
 
-            let mut reader = BufReader::new(stream).lines();
-            if let Ok(Some(line)) = reader.next_line().await {
-                debug!("Received: {}", line);
-                let response = JsonMessage::parse(&line)?;
-                return Ok(Self::parse_diagnostics(&response));
+        Ok(settings)
+    }
+}
+
+fn mode_from_settings(settings_json: &Option<Value>) -> ServerMode {
+    match setting_string(settings_json, SETTINGS_KEY_MODE)
+        .as_deref()
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("bridge") => ServerMode::Bridge,
+        _ => ServerMode::Native,
+    }
+}
+
+fn resolve_command_path(
+    worktree: &zed::Worktree,
+    mode: ServerMode,
+    binary: Option<&zed::settings::CommandSettings>,
+) -> String {
+    if let Some(path) = binary.and_then(|binary| binary.path.clone()) {
+        return path;
+    }
+
+    match mode {
+        ServerMode::Native => worktree
+            .which(DEFAULT_NATIVE_BINARY)
+            .unwrap_or_else(|| DEFAULT_NATIVE_BINARY.to_string()),
+        ServerMode::Bridge => worktree
+            .which(DEFAULT_BRIDGE_BINARY)
+            .unwrap_or_else(|| DEFAULT_BRIDGE_BINARY.to_string()),
+    }
+}
+
+fn resolve_command_args(
+    mode: ServerMode,
+    binary: Option<&zed::settings::CommandSettings>,
+    settings_json: &Option<Value>,
+) -> Vec<String> {
+    if let Some(args) = binary.and_then(|binary| binary.arguments.clone()) {
+        return args;
+    }
+
+    match mode {
+        ServerMode::Native => native_default_args(settings_json),
+        ServerMode::Bridge => Vec::new(),
+    }
+}
+
+fn native_default_args(settings_json: &Option<Value>) -> Vec<String> {
+    let mut args = vec!["vscode_server".to_string()];
+
+    if let Some(logic) = setting_string(settings_json, SETTINGS_KEY_NATIVE_LOGIC) {
+        args.push("-l".to_string());
+        args.push(logic);
+    }
+
+    if setting_bool(settings_json, SETTINGS_KEY_NATIVE_NO_BUILD).unwrap_or(false) {
+        args.push("-n".to_string());
+    }
+
+    for session_dir in setting_string_array(settings_json, SETTINGS_KEY_NATIVE_SESSION_DIRS) {
+        args.push("-d".to_string());
+        args.push(session_dir);
+    }
+
+    args
+}
+
+fn resolve_environment(
+    worktree: &zed::Worktree,
+    mode: ServerMode,
+    binary: Option<&zed::settings::CommandSettings>,
+    settings_json: &Option<Value>,
+) -> Vec<(String, String)> {
+    let mut env = merge_environment(
+        worktree.shell_env(),
+        binary.and_then(|binary| binary.env.clone()),
+    );
+
+    match mode {
+        ServerMode::Native => env,
+        ServerMode::Bridge => {
+            let bridge_socket = setting_string(settings_json, SETTINGS_KEY_BRIDGE_SOCKET)
+                .unwrap_or_else(|| DEFAULT_BRIDGE_SOCKET.to_string());
+            let session = setting_string(settings_json, SETTINGS_KEY_SESSION)
+                .unwrap_or_else(|| DEFAULT_SESSION.to_string());
+
+            ensure_env_var(&mut env, ENV_BRIDGE_SOCKET, bridge_socket);
+            ensure_env_var(&mut env, ENV_SESSION, session);
+
+            if let Some(command) =
+                setting_string(settings_json, SETTINGS_KEY_BRIDGE_AUTOSTART_COMMAND)
+            {
+                upsert_env_var(&mut env, ENV_BRIDGE_AUTOSTART_CMD.to_string(), command);
             }
-        }
 
-        Ok(vec![])
-    }
-
-    pub async fn request_markup(&mut self, uri: &str, line: u32, col: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        if self.stream.is_none() {
-            self.connect().await?;
-        }
-
-        let msg = JsonMessage::create_markup(uri, line, col, &self.session, self.version);
-
-        if let Some(ref mut stream) = self.stream {
-            stream.write_all(msg.serialize()?.as_bytes()).await?;
-            stream.flush().await?;
-
-            let mut reader = BufReader::new(stream).lines();
-            if let Ok(Some(line)) = reader.next_line().await {
-                debug!("Received markup: {}", line);
-                let response = JsonMessage::parse(&line)?;
-                return Ok(Self::parse_markup_info(&response));
+            if let Some(timeout_ms) =
+                setting_u64(settings_json, SETTINGS_KEY_BRIDGE_AUTOSTART_TIMEOUT_MS)
+            {
+                upsert_env_var(
+                    &mut env,
+                    ENV_BRIDGE_AUTOSTART_TIMEOUT_MS.to_string(),
+                    timeout_ms.to_string(),
+                );
             }
+
+            env
         }
-
-        Ok(String::new())
-    }
-
-    fn parse_diagnostics(msg: &JsonMessage) -> Vec<Diagnostic> {
-        if let Ok(payload) = serde_json::from_value::<serde_json::Value>(msg.payload.clone()) {
-            if let Ok(diagnostics) = serde_json::from_value::<Vec<Diagnostic>>(payload.get("diagnostics").cloned().unwrap_or(serde_json::Value::Array(vec![]))) {
-                return diagnostics;
-            }
-        }
-        vec![]
-    }
-
-    fn parse_markup_info(msg: &JsonMessage) -> String {
-        if let Ok(payload) = serde_json::from_value::<serde_json::Value>(msg.payload.clone()) {
-            if let Some(info) = payload.get("info").and_then(|v| v.as_str()) {
-                return info.to_string();
-            }
-        }
-        String::new()
-    }
-
-    pub fn disconnect(&mut self) {
-        self.stream = None;
     }
 }
+
+fn merge_environment(
+    mut base: Vec<(String, String)>,
+    overrides: Option<HashMap<String, String>>,
+) -> Vec<(String, String)> {
+    if let Some(overrides) = overrides {
+        for (key, value) in overrides {
+            upsert_env_var(&mut base, key, value);
+        }
+    }
+
+    base
+}
+
+fn upsert_env_var(env: &mut Vec<(String, String)>, key: String, value: String) {
+    if let Some(existing) = env.iter_mut().find(|entry| entry.0 == key) {
+        existing.1 = value;
+        return;
+    }
+
+    env.push((key, value));
+}
+
+fn ensure_env_var(env: &mut Vec<(String, String)>, key: &str, value: String) {
+    if env.iter().any(|entry| entry.0 == key) {
+        return;
+    }
+
+    env.push((key.to_string(), value));
+}
+
+fn setting_string(settings_json: &Option<Value>, key: &str) -> Option<String> {
+    settings_json
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn setting_bool(settings_json: &Option<Value>, key: &str) -> Option<bool> {
+    settings_json
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_bool)
+}
+
+fn setting_u64(settings_json: &Option<Value>, key: &str) -> Option<u64> {
+    settings_json
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_u64)
+}
+
+fn setting_string_array(settings_json: &Option<Value>, key: &str) -> Vec<String> {
+    settings_json
+        .as_ref()
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn strip_control_settings(settings: Value) -> Option<Value> {
+    let mut object = settings.as_object()?.clone();
+
+    for key in [
+        SETTINGS_KEY_MODE,
+        SETTINGS_KEY_BRIDGE_SOCKET,
+        SETTINGS_KEY_SESSION,
+        SETTINGS_KEY_BRIDGE_AUTOSTART_COMMAND,
+        SETTINGS_KEY_BRIDGE_AUTOSTART_TIMEOUT_MS,
+        SETTINGS_KEY_NATIVE_LOGIC,
+        SETTINGS_KEY_NATIVE_NO_BUILD,
+        SETTINGS_KEY_NATIVE_SESSION_DIRS,
+    ] {
+        object.remove(key);
+    }
+
+    if object.is_empty() {
+        None
+    } else {
+        Some(Value::Object(object))
+    }
+}
+
+zed::register_extension!(IsabelleExtension);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zed::serde_json::json;
 
     #[test]
-    fn test_document_push_creation() {
-        let msg = JsonMessage::create_document_push("file:///test.thy", "theory Test", "s1", 1);
-        assert_eq!(msg.msg_type, "document.push");
-        assert_eq!(msg.session, Some("s1".to_string()));
+    fn mode_defaults_to_native() {
+        assert_eq!(mode_from_settings(&None), ServerMode::Native);
+        assert_eq!(
+            mode_from_settings(&Some(json!({ "mode": "native" }))),
+            ServerMode::Native
+        );
+        assert_eq!(
+            mode_from_settings(&Some(json!({ "mode": "bridge" }))),
+            ServerMode::Bridge
+        );
     }
 
     #[test]
-    fn test_markup_creation() {
-        let msg = JsonMessage::create_markup("file:///test.thy", 5, 10, "s1", 1);
-        assert_eq!(msg.msg_type, "markup");
+    fn strip_control_settings_keeps_only_lsp_payload() {
+        let input = json!({
+            "mode": "bridge",
+            "bridge_socket": "/tmp/isabelle.sock",
+            "session": "s1",
+            "bridge_autostart_command": "bridge --socket /tmp/isabelle.sock",
+            "bridge_autostart_timeout_ms": 10000,
+            "native_logic": "HOL",
+            "native_no_build": false,
+            "native_session_dirs": ["."],
+            "isabelle": {
+                "completion_limit": 200
+            }
+        });
+
+        let output = strip_control_settings(input).expect("settings should not be empty");
+        assert_eq!(output, json!({ "isabelle": { "completion_limit": 200 }}));
     }
 
     #[test]
-    fn test_parse_diagnostics() {
-        let json = r#"{"id":"msg-1","type":"diagnostics","session":"s1","version":1,"payload":{"diagnostics":[{"uri":"file:///test.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}}"#;
-        let msg = JsonMessage::parse(json).unwrap();
-        let diags = IsabelleBridge::parse_diagnostics(&msg);
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].message, "Parse error");
+    fn strip_control_settings_returns_none_for_control_only_input() {
+        let input = json!({
+            "mode": "bridge",
+            "bridge_socket": "/tmp/isabelle.sock"
+        });
+
+        assert_eq!(strip_control_settings(input), None);
     }
 }

@@ -1,81 +1,94 @@
 # Isabelle-Zed
 
-Isabelle theorem prover support for the Zed code editor.
+Isabelle support for Zed with two runtime options:
 
-## Architecture
+```text
+native mode (default):
+  Zed Extension (WASM) -> isabelle vscode_server
 
+bridge mode:
+  Zed Extension (WASM)
+    -> isabelle-zed-lsp (Rust LSP proxy)
+    -> bridge (Rust NDJSON process/socket bridge)
+    -> scala-adapter (Scala mock or Isabelle-backed adapter)
 ```
-┌─────────────┐     NDJSON      ┌──────────┐     NDJSON      ┌──────────────┐
-│    Zed      │ ──────────────►│  Bridge  │ ──────────────►│ Scala Adapter│
-│  Extension  │◄──────────────│  (Rust)  │◄────────────────│   (Scala)    │
-└─────────────┘                └──────────┘                 └──────────────┘
-```
 
-## Components
+## What currently works
 
-- **[bridge/](bridge/README.md)** - Rust NDJSON bridge process
-- **[scala-adapter/](scala-adapter/README.md)** - Scala PIDE adapter
-- **[zed-extension/](zed-extension/README.md)** - Zed editor extension
+- `.thy` language registration in Zed extension manifest.
+- Native mode via official `isabelle vscode_server` (real PIDE-backed LSP).
+- Bridge-mode diagnostics pipeline (`didOpen`/`didChange`/`didSave` -> `document.push` -> diagnostics).
+- Bridge-mode hover pipeline (`textDocument/hover` -> `markup`).
+- Bridge mock mode and external adapter socket mode.
+- Mock end-to-end CI checks (NDJSON and LSP path).
 
-## Quick Start
-
-### Mock Mode (no Isabelle required)
+## Build
 
 ```bash
-# Terminal 1: Start bridge in mock mode
-cd bridge
-cargo run -- --mock --socket /tmp/isabelle.sock
-
-# Terminal 2: Send test message
-echo '{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///test.thy","text":"theory Test begin end"}}' | nc -U /tmp/isabelle.sock
+make bridge-build
+make lsp-build
+make zed-build
 ```
 
-### With Real Isabelle
+## Native mode smoke test
 
 ```bash
-# Terminal 1: Start bridge
-cd bridge
-cargo run -- --socket /tmp/isabelle.sock
-
-# Terminal 2: Start Scala adapter
-cd scala-adapter
-sbt "run"
-
-# Terminal 3: Use in Zed
-# Load zed-extension in Zed dev mode
+make native-lsp-smoke
 ```
 
-## Development
+## Mock demo (bridge-mode LSP end-to-end)
 
-### Build
+This verifies the same path Zed uses (LSP -> bridge):
 
 ```bash
-# Bridge (Rust)
-cd bridge && cargo build --release
-
-# Scala adapter
-cd scala-adapter && sbt compile
-
-# Zed extension
-cd zed-extension && cargo build --release
+make mock-lsp-e2e
 ```
 
-### Test
+## Mock demo (bridge + scala-adapter socket)
+
+### Terminal 1
 
 ```bash
-# Rust tests
-cd bridge && cargo test
-
-# Scala tests
-cd scala-adapter && sbt test
+make mock-adapter
 ```
 
-## References
+### Terminal 2
 
-- [Isabelle/jEdit — a Prover IDE within the PIDE framework](https://arxiv.org/abs/1207.3441)
-- [Isabelle System Manual](https://isabelle.in.tum.de/doc/system.pdf)
-- [Zed Extensions](https://zed.dev/docs/extensions/developing-extensions)
+```bash
+make mock-bridge-adapter
+```
 
-## License
+### Terminal 3
 
-MIT
+```bash
+make mock-send
+```
+
+Expected NDJSON response:
+
+```json
+{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}
+```
+
+## Use in Zed (dev extension)
+
+1. Build the local LSP binary:
+
+```bash
+cargo build --manifest-path isabelle-lsp/Cargo.toml --release
+```
+
+2. Build extension wasm:
+
+```bash
+cargo build --manifest-path zed-extension/Cargo.toml --target wasm32-wasip2 --release
+```
+
+3. In Zed, open `zed: extensions` -> `Install Dev Extension` -> select `zed-extension/`.
+4. Native mode (default) uses `isabelle vscode_server`; make sure `isabelle` is on `PATH`.
+5. For bridge mode, set `lsp.isabelle-lsp.settings.mode = "bridge"` and configure `binary.path` to `isabelle-zed-lsp` if needed.
+
+## Real Isabelle-backed mode
+
+- Native mode is already real Isabelle-backed through `isabelle vscode_server`.
+- Bridge mode keeps the custom protocol path for experimentation and integration testing.

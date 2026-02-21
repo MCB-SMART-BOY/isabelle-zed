@@ -2,19 +2,22 @@ name := "isabelle-scala-adapter"
 
 version := "0.1.0"
 
-scalaVersion := "3.4.0"
+scalaVersion := "3.4.2"
 
 libraryDependencies ++= Seq(
-  "org.json4s" %% "json4s-native" % "4.0.6",
-  "org.json4s" %% "json4s-jackson" % "4.0.6",
-  "org.scalatest" %% "scalatest" % "3.2.18" % Test,
-  "org.scalatestplus" %% "mockito-4-6" % "3.2.18.0" % Test
+  "io.circe" %% "circe-core" % "0.14.10",
+  "io.circe" %% "circe-generic" % "0.14.10",
+  "io.circe" %% "circe-parser" % "0.14.10",
+  "org.scalatest" %% "scalatest" % "3.2.19" % Test
 )
+
+Compile / run / fork := true
+Test / fork := false
+Test / parallelExecution := false
 
 scalacOptions ++= Seq(
   "-deprecation",
   "-feature",
-  "-unchecked"
+  "-unchecked",
+  "-Xfatal-warnings"
 )
-
-Test / logBuffered := false
