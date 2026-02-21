@@ -48,7 +48,7 @@ cp "$repo_root/zed-extension/README.md" "$package_dir/zed-extension/"
 cp -R "$repo_root/zed-extension/src" "$package_dir/zed-extension/src"
 cp -R "$repo_root/zed-extension/languages" "$package_dir/zed-extension/languages"
 cp "$repo_root/zed-extension/target/wasm32-wasip2/release/isabelle_zed_extension.wasm" \
-  "$package_dir/zed-extension/isabelle_zed_extension.wasm"
+  "$package_dir/zed-extension/extension.wasm"
 
 cp "$repo_root/examples/zed-settings-native.json" "$package_dir/examples/"
 cp "$repo_root/examples/zed-settings-bridge-mock.json" "$package_dir/examples/"

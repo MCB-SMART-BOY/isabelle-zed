@@ -8,6 +8,7 @@ SHELL := /bin/bash
 	 doctor \
 	 release-build \
 	 install-local \
+	 install-zed-native \
 	 release-package \
 	 bridge-mock-up bridge-mock-down \
 	 mock-bridge mock-bridge-adapter mock-adapter mock-send mock-lsp-e2e \
@@ -48,6 +49,9 @@ release-build:
 
 install-local:
 	./scripts/install_local.sh
+
+install-zed-native:
+	./scripts/install_zed_native.sh
 
 release-package:
 	./scripts/package_release.sh

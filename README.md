@@ -20,31 +20,24 @@ bridge mode (integration/testing):
 - Bridge mode supports diagnostics + hover through the NDJSON protocol.
 - Mock end-to-end checks exist for both NDJSON and LSP paths.
 
-## Quick start (usable in Zed now)
+## Zero-config install (recommended)
 
-### 1. Build release artifacts
+Install extension into Zed and use native mode directly (no `settings.json` edits):
 
 ```bash
-make release-build
+make install-zed-native
 ```
 
-### 2. Install as a dev extension in Zed
+Then restart Zed (or reload extensions) and open a `.thy` file.
 
-1. Open Zed command palette.
-2. Run `zed: extensions`.
-3. Click `Install Dev Extension`.
-4. Select `.../isabelle-zed/zed-extension`.
+Requirement: `isabelle` must be available on your shell `PATH`.
 
-### 3. Configure Zed settings
+## Optional configuration examples
 
-- Native mode example: `examples/zed-settings-native.json`
-- Bridge mock example: `examples/zed-settings-bridge-mock.json`
+- Native custom settings: `examples/zed-settings-native.json`
+- Bridge mock settings: `examples/zed-settings-bridge-mock.json`
 
-Copy the JSON content into your Zed `settings.json`.
-
-### 4. Open a `.thy` file
-
-If native mode is active and `isabelle` is on `PATH`, diagnostics/hover are provided by Isabelle.
+Use these only if you need custom behavior.
 
 ## Local install helpers
 

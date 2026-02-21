@@ -22,4 +22,5 @@ if [[ ":${PATH}:" != *":$install_bin_dir:"* ]]; then
 fi
 
 echo
-echo "Next step: install dev extension in Zed from $repo_root/zed-extension"
+echo "Next step:"
+echo "  make install-zed-native"

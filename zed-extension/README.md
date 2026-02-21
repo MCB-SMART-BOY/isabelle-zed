@@ -5,7 +5,20 @@ This extension can run in two modes:
 - `native` (recommended): run `isabelle vscode_server` directly.
 - `bridge`: run `isabelle-zed-lsp`, which forwards to `bridge`.
 
-## Build
+## Install for immediate use (no settings edits)
+
+From repository root:
+
+```bash
+make install-zed-native
+```
+
+This installs the extension directly into Zed's local `installed` extensions directory.
+Default runtime mode is `native`, so no `settings.json` changes are required.
+
+Requirement: `isabelle` must be on `PATH`.
+
+## Build manually
 
 ```bash
 cargo build --manifest-path ../isabelle-lsp/Cargo.toml --release
@@ -18,62 +31,12 @@ Or from repo root:
 make release-build
 ```
 
-## Install as dev extension
+## Optional settings examples
 
-1. Open Zed command palette.
-2. Run `zed: extensions`.
-3. Click `Install Dev Extension`.
-4. Select this folder: `.../isabelle-zed/zed-extension`.
+Use these only if you need custom overrides:
 
-## Native mode settings (recommended)
-
-Use `examples/zed-settings-native.json` from repo root.
-
-Minimal inline example:
-
-```json
-{
-  "lsp": {
-    "isabelle-lsp": {
-      "settings": {
-        "mode": "native",
-        "native_logic": "HOL",
-        "native_no_build": false
-      }
-    }
-  }
-}
-```
-
-Requirements:
-
-- `isabelle` must be available on `PATH`.
-- `isabelle vscode_server` must work in terminal.
-
-## Bridge mode settings
-
-Use `examples/zed-settings-bridge-mock.json` from repo root.
-
-Minimal inline example:
-
-```json
-{
-  "lsp": {
-    "isabelle-lsp": {
-      "binary": {
-        "path": "/absolute/path/to/isabelle-zed/isabelle-lsp/target/release/isabelle-zed-lsp"
-      },
-      "settings": {
-        "mode": "bridge",
-        "bridge_socket": "/tmp/isabelle.sock",
-        "session": "s1",
-        "bridge_autostart_command": "/absolute/path/to/isabelle-zed/bridge/target/release/bridge --mock --socket /tmp/isabelle.sock",
-        "bridge_autostart_timeout_ms": 10000
-      }
-    }
-  }
-}
-```
+- `examples/zed-settings-native.json`
+- `examples/zed-settings-bridge-mock.json`
 
 ## Release and packaging notes
 
@@ -84,7 +47,7 @@ make doctor
 make release-package
 ```
 
-The package includes extension sources, prebuilt wasm artifact, and `bridge`/`isabelle-zed-lsp` binaries.
+The package includes extension manifest + wasm artifact and `bridge`/`isabelle-zed-lsp` binaries.
 
 ## Commands exposed by the LSP proxy
 
