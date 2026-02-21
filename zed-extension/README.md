@@ -18,6 +18,12 @@ Default runtime mode is `native`, so no `settings.json` changes are required.
 
 Requirement: `isabelle` must be on `PATH`.
 
+Uninstall:
+
+```bash
+make uninstall-zed-native
+```
+
 ## Build manually
 
 ```bash

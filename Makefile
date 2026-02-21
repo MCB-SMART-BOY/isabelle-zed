@@ -9,6 +9,7 @@ SHELL := /bin/bash
 	 release-build \
 	 install-local \
 	 install-zed-native \
+	 uninstall-zed-native \
 	 release-package \
 	 bridge-mock-up bridge-mock-down \
 	 mock-bridge mock-bridge-adapter mock-adapter mock-send mock-lsp-e2e \
@@ -52,6 +53,9 @@ install-local:
 
 install-zed-native:
 	./scripts/install_zed_native.sh
+
+uninstall-zed-native:
+	./scripts/uninstall_zed_native.sh
 
 release-package:
 	./scripts/package_release.sh

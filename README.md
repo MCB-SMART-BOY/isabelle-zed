@@ -32,6 +32,12 @@ Then restart Zed (or reload extensions) and open a `.thy` file.
 
 Requirement: `isabelle` must be available on your shell `PATH`.
 
+Uninstall the extension:
+
+```bash
+make uninstall-zed-native
+```
+
 ## Optional configuration examples
 
 - Native custom settings: `examples/zed-settings-native.json`
