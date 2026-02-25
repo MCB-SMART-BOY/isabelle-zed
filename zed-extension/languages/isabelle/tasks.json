@@ -1,20 +1,22 @@
 [
   {
     "label": "isabelle: check current theory (process_theories)",
-    "command": "bash",
+    "command": "isabelle",
     "args": [
-      "-lc",
-      "set -euo pipefail; worktree=\"${ZED_WORKTREE_ROOT:-$PWD}\"; dir=\"${ZED_DIRNAME:-$worktree}\"; file=\"${ZED_FILENAME:-}\"; if [ -z \"$file\" ] || [ \"${file%.thy}\" = \"$file\" ]; then found=\"$(find \"$dir\" -maxdepth 1 -type f -name '*.thy' | sort | head -n 1)\"; file=\"${found##*/}\"; fi; if [ -z \"$file\" ] || [ \"${file%.thy}\" = \"$file\" ]; then echo \"No .thy file selected/found in $dir\" >&2; exit 1; fi; theory=\"${file%.thy}\"; isabelle process_theories -D \"$dir\" -O \"$theory\""
+      "process_theories",
+      "-D",
+      "$ZED_WORKTREE_ROOT"
     ],
     "cwd": "$ZED_WORKTREE_ROOT",
     "tags": ["isabelle-check"]
   },
   {
     "label": "isabelle: build worktree session (build -D)",
-    "command": "bash",
+    "command": "isabelle",
     "args": [
-      "-lc",
-      "set -euo pipefail; worktree=\"${ZED_WORKTREE_ROOT:-$PWD}\"; isabelle build -D \"$worktree\""
+      "build",
+      "-D",
+      "$ZED_WORKTREE_ROOT"
     ],
     "cwd": "$ZED_WORKTREE_ROOT"
   }
