@@ -12,10 +12,11 @@
   },
   {
     "label": "isabelle: build worktree session (build -D)",
-    "command": "python3",
+    "command": "isabelle",
     "args": [
-      "-c",
-      "import os, pathlib, subprocess, sys; root = os.environ.get('ZED_WORKTREE_ROOT') or os.getcwd(); has_root = (pathlib.Path(root) / 'ROOT').is_file() or (pathlib.Path(root) / 'ROOTS').is_file(); cmd = ['isabelle', 'build', '-D', root] if has_root else ['isabelle', 'process_theories', '-D', root]; (not has_root) and print(f\"[isabelle-zed] No ROOT/ROOTS in {root}; fallback to process_theories -D\", file=sys.stderr); raise SystemExit(subprocess.run(cmd).returncode)"
+      "process_theories",
+      "-D",
+      "$ZED_WORKTREE_ROOT"
     ],
     "cwd": "$ZED_WORKTREE_ROOT"
   }
