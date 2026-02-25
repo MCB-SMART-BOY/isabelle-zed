@@ -30,6 +30,12 @@ ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
 - `ISABELLE_SESSION`（默认 `s1`）
 - `ISABELLE_BRIDGE_AUTOSTART_CMD`（可选）：bridge socket 不存在时用于自动拉起 bridge 的 shell 命令
 - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS`（默认 `5000`）
+- `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS`（默认 `12000`）：单次 bridge 请求超时时间，超时会重连重试一次
+
+### 诊断位置与跨文件诊断
+
+- bridge/adapter 侧诊断位置按 1-based 传输，LSP 发布时会转换为 LSP 的 0-based 坐标。
+- 发布诊断时会按诊断自身 `uri` 分组并分别发布，支持跨文件诊断语义。
 
 ## English
 
@@ -61,3 +67,9 @@ Optional environment variables:
 - `ISABELLE_SESSION` (default: `s1`)
 - `ISABELLE_BRIDGE_AUTOSTART_CMD` (optional): shell command to auto-start bridge when socket is missing
 - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS` (default: `5000`)
+- `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS` (default: `12000`): per-request timeout for bridge calls, with one reconnect retry
+
+### Diagnostic positions and cross-file diagnostics
+
+- bridge/adapter diagnostic positions are transported as 1-based and converted to LSP 0-based positions before publish.
+- diagnostics are grouped and published by each diagnostic `uri`, preserving cross-file semantics.

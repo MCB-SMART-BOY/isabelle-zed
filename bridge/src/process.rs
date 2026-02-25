@@ -3,6 +3,7 @@ use crate::protocol::{
     parse_message, to_ndjson,
 };
 use serde::Deserialize;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -16,9 +17,14 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
 enum AdapterMode {
-    SpawnReal { isabelle_path: String },
+    SpawnReal {
+        isabelle_path: String,
+        adapter_command: Option<String>,
+    },
     MockSubprocess,
-    Socket { address: String },
+    Socket {
+        address: String,
+    },
 }
 
 enum AdapterWriter {
@@ -57,13 +63,30 @@ pub struct ProcessManager {
 }
 
 impl ProcessManager {
-    pub fn new(isabelle_path: String, mock_mode: bool, adapter_socket: Option<String>) -> Self {
+    pub fn new(
+        isabelle_path: String,
+        mock_mode: bool,
+        adapter_socket: Option<String>,
+        adapter_command: Option<String>,
+    ) -> Self {
+        let adapter_command = adapter_command.and_then(|command| {
+            let trimmed = command.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+
         let mode = if mock_mode {
             AdapterMode::MockSubprocess
         } else if let Some(address) = adapter_socket {
             AdapterMode::Socket { address }
         } else {
-            AdapterMode::SpawnReal { isabelle_path }
+            AdapterMode::SpawnReal {
+                isabelle_path,
+                adapter_command,
+            }
         };
 
         let (output_tx, output_rx) = mpsc::channel(256);
@@ -89,11 +112,17 @@ impl ProcessManager {
         self.stop().await?;
 
         match self.mode.clone() {
-            AdapterMode::SpawnReal { isabelle_path } => {
-                let mut command = Command::new(isabelle_path);
-                command.arg("scala");
-                self.start_spawn(command).await
-            }
+            AdapterMode::SpawnReal {
+                isabelle_path,
+                adapter_command,
+            } => match adapter_command {
+                Some(command_line) => {
+                    let mut command = Command::new("bash");
+                    command.arg("-lc").arg(command_line);
+                    self.start_spawn(command).await
+                }
+                None => self.start_default_real_adapter(&isabelle_path).await,
+            },
             AdapterMode::MockSubprocess => {
                 let current_exe: PathBuf =
                     std::env::current_exe().map_err(|err| ProcessError::Spawn(err.to_string()))?;
@@ -161,12 +190,61 @@ impl ProcessManager {
             .stdout
             .take()
             .ok_or_else(|| ProcessError::Spawn("failed to acquire child stdout".to_string()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ProcessError::Spawn("failed to acquire child stderr".to_string()))?;
 
         self.writer = Some(AdapterWriter::Child(stdin));
         self.child = Some(child);
         self.spawn_output_reader(stdout);
+        self.spawn_stderr_reader(stderr);
 
         Ok(())
+    }
+
+    async fn start_default_real_adapter(
+        &mut self,
+        isabelle_path: &str,
+    ) -> Result<(), ProcessError> {
+        let adapter_dir = Self::locate_scala_adapter_dir().ok_or_else(|| {
+            ProcessError::Spawn(
+                "real adapter mode requires --adapter-command, --adapter-socket, or a local scala-adapter directory"
+                    .to_string(),
+            )
+        })?;
+
+        let mut command = Command::new("sbt");
+        command.current_dir(adapter_dir);
+        command.arg("-batch");
+        command.arg(format!("run --isabelle-path={isabelle_path}"));
+        self.start_spawn(command).await
+    }
+
+    fn locate_scala_adapter_dir() -> Option<PathBuf> {
+        if let Ok(current_dir) = std::env::current_dir()
+            && let Some(path) = Self::find_scala_adapter_from_base(&current_dir)
+        {
+            return Some(path);
+        }
+
+        if let Ok(current_exe) = std::env::current_exe()
+            && let Some(path) = Self::find_scala_adapter_from_base(&current_exe)
+        {
+            return Some(path);
+        }
+
+        None
+    }
+
+    fn find_scala_adapter_from_base(base: &Path) -> Option<PathBuf> {
+        for parent in base.ancestors() {
+            let candidate = parent.join("scala-adapter");
+            if candidate.join("build.sbt").is_file() {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     async fn start_socket(&mut self, address: &str) -> Result<(), ProcessError> {
@@ -196,6 +274,24 @@ impl ProcessManager {
                     Ok(None) => break,
                     Err(err) => {
                         error!("adapter stdout read error: {err}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn spawn_stderr_reader(&self, stderr: tokio::process::ChildStderr) {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        warn!("adapter stderr: {line}");
+                    }
+                    Ok(None) => break,
+                    Err(err) => {
+                        error!("adapter stderr read error: {err}");
                         break;
                     }
                 }

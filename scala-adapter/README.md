@@ -9,6 +9,7 @@
 - `stdin/stdout`（默认）
 - `--socket=<host>:<port>`
 - `--mock`（CI 可复现）
+- 连接级并发上限与收尾保护（避免 `inflight` 无界增长）
 
 ### 路径约定
 
@@ -84,6 +85,7 @@ sbt test
 - `--mock`：固定返回 `Parse error`，用于 CI
 - 真实模式：通过 `isabelle process_theories -D <tmp> -O <Theory>` 检查 theory
 - 真实模式 hover 当前返回占位信息
+- 诊断位置信息按 1-based 输出（由 LSP 侧转换到 0-based）
 
 ## English
 
@@ -94,6 +96,7 @@ Supported transports/modes:
 - `stdin/stdout` (default)
 - `--socket=<host>:<port>`
 - deterministic `--mock` mode for CI
+- connection-level concurrency cap and shutdown safeguards (to avoid unbounded `inflight` growth)
 
 ### Path convention
 
@@ -169,3 +172,4 @@ Tests run `AdapterMain` in `--mock` mode and validate a full `document.push -> d
 - `--mock`: deterministic CI mode (`Parse error` diagnostics)
 - real mode: checks pushed theory text via `isabelle process_theories -D <tmp> -O <Theory>`
 - hover in real mode currently returns placeholder text
+- diagnostic positions are emitted as 1-based (converted to LSP 0-based in `isabelle-zed-lsp`)

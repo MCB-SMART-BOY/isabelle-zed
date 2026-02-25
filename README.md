@@ -111,6 +111,20 @@ make mock-lsp-e2e
 make bridge-mock-down
 ```
 
+### Bridge 真实链路（adapter-command）
+
+bridge 默认真实模式会优先尝试在仓库内定位 `scala-adapter` 并启动：
+
+```bash
+sbt -batch "run --isabelle-path=isabelle"
+```
+
+你也可以显式指定自定义启动命令：
+
+```bash
+bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
+```
+
 ### 常用命令
 
 ```bash
@@ -119,6 +133,11 @@ make lsp-test
 make zed-check
 make native-lsp-smoke
 ```
+
+### Release 说明
+
+- `make release-package` 会把根目录 `LICENSE` 一并打入发布包。
+- 发布版本号来自 `zed-extension/extension.toml` 的 `version` 字段。
 
 ## English
 
@@ -231,6 +250,20 @@ make mock-lsp-e2e
 make bridge-mock-down
 ```
 
+### Bridge real-path startup (adapter-command)
+
+In real mode, bridge now tries to locate local `scala-adapter` and starts:
+
+```bash
+sbt -batch "run --isabelle-path=isabelle"
+```
+
+You can also provide an explicit startup command:
+
+```bash
+bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
+```
+
 ### Common commands
 
 ```bash
@@ -239,3 +272,8 @@ make lsp-test
 make zed-check
 make native-lsp-smoke
 ```
+
+### Release notes
+
+- `make release-package` now includes root `LICENSE` in the archive.
+- Release version is read from `zed-extension/extension.toml` (`version`).

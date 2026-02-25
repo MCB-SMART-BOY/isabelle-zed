@@ -46,10 +46,14 @@ Mock 模式（CI / 本地可复现测试）：
 - `--socket <PATH>`：监听 Unix Socket；省略则走 stdin/stdout
 - `--isabelle-path <PATH>`：Isabelle 可执行路径，默认 `isabelle`
 - `--adapter-socket <HOST:PORT>`：连接外部已运行适配器（TCP）
+- `--adapter-command <CMD>`：使用自定义命令启动适配器进程（经 `bash -lc` 执行）
 - `--debounce-ms <N>`：`document.push` 防抖窗口，默认 `300`
 - `--log-dir <PATH>`：调试日志目录
-- `--mock`：使用内置 mock adapter（不启动 `isabelle scala`）
+- `--mock`：使用内置 mock adapter
 - `--debug`：启用 debug 日志并写入滚动日志文件
+
+未设置 `--adapter-socket` 与 `--adapter-command` 时，bridge 会尝试在本地仓库中定位
+`scala-adapter/build.sbt` 并通过 `sbt -batch "run --isabelle-path=..."` 启动适配器。
 
 ### 协议示例（精确）
 
@@ -131,10 +135,15 @@ External Scala adapter socket mode:
 - `--socket <PATH>`: listen on a Unix socket; if omitted uses stdin/stdout
 - `--isabelle-path <PATH>`: Isabelle executable path (default `isabelle`)
 - `--adapter-socket <HOST:PORT>`: connect to external running adapter over TCP
+- `--adapter-command <CMD>`: start adapter process with a custom command (via `bash -lc`)
 - `--debounce-ms <N>`: debounce window for `document.push` (default `300`)
 - `--log-dir <PATH>`: directory for debug logs
-- `--mock`: use built-in mock adapter instead of spawning `isabelle scala`
+- `--mock`: use built-in mock adapter
 - `--debug`: enable debug logging and rotating debug file output
+
+If `--adapter-socket` and `--adapter-command` are both omitted, bridge tries to
+locate `scala-adapter/build.sbt` in the local repository and launches:
+`sbt -batch "run --isabelle-path=..."`.
 
 ### Protocol examples (exact)
 

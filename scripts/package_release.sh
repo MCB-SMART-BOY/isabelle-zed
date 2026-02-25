@@ -54,6 +54,8 @@ cp "$repo_root/examples/zed-settings-native.json" "$package_dir/examples/"
 cp "$repo_root/examples/zed-settings-bridge-mock.json" "$package_dir/examples/"
 cp "$repo_root/examples/zed-keymap-isabelle.json" "$package_dir/examples/"
 cp "$repo_root/README.md" "$package_dir/docs/README.md"
+cp "$repo_root/CHANGELOG.md" "$package_dir/docs/CHANGELOG.md"
+cp "$repo_root/LICENSE" "$package_dir/LICENSE"
 
 rm -f "$archive_path"
 tar -C "$dist_dir" -czf "$archive_path" "$package_root"

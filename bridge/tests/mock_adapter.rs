@@ -4,6 +4,7 @@ use bridge::protocol::{
     DIAGNOSTICS_EXAMPLE, DOCUMENT_PUSH_EXAMPLE, MessageType, Severity,
     diagnostics_message_from_request, parse_message, to_ndjson,
 };
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -209,4 +210,98 @@ async fn bridge_routes_to_external_adapter_socket() {
         .await
         .expect("mock adapter task should finish")
         .expect("mock adapter task should succeed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_routes_to_adapter_command_process() {
+    let temp = TempDir::new().expect("temp dir should be created");
+    let socket_path = temp.path().join("isabelle.sock");
+    let adapter_script = temp.path().join("adapter.py");
+    fs::write(
+        &adapter_script,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+for raw in sys.stdin:
+    line = raw.strip()
+    if not line:
+        continue
+
+    try:
+        request = json.loads(line)
+    except Exception:
+        continue
+
+    msg_type = request.get("type")
+    if msg_type not in ("document.push", "document.check"):
+        continue
+
+    payload = request.get("payload", {})
+    uri = payload.get("uri", "file:///home/user/example.thy")
+    response = {
+        "id": request["id"],
+        "type": "diagnostics",
+        "session": request["session"],
+        "version": request["version"],
+        "payload": [{
+            "uri": uri,
+            "range": {
+                "start": {"line": 1, "col": 0},
+                "end": {"line": 1, "col": 6},
+            },
+            "severity": "error",
+            "message": "Parse error",
+        }],
+    }
+    sys.stdout.write(json.dumps(response) + "\n")
+    sys.stdout.flush()
+"#,
+    )
+    .expect("mock adapter script should be written");
+
+    let adapter_command = format!("python3 -u {}", adapter_script.display());
+    let mut bridge = Command::new(bridge_binary_path())
+        .arg("--socket")
+        .arg(&socket_path)
+        .arg("--adapter-command")
+        .arg(&adapter_command)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("bridge should start");
+
+    wait_for_socket(&socket_path).await;
+
+    let stream = UnixStream::connect(&socket_path)
+        .await
+        .expect("client should connect to bridge socket");
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    writer
+        .write_all(DOCUMENT_PUSH_EXAMPLE.as_bytes())
+        .await
+        .expect("request should be written");
+    writer
+        .write_all(b"\n")
+        .await
+        .expect("newline should be written");
+    writer.flush().await.expect("request should flush");
+
+    let mut line = String::new();
+    timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        .await
+        .expect("timed out waiting for diagnostics")
+        .expect("should read a diagnostics line");
+
+    let response = parse_message(line.trim_end()).expect("response should parse");
+    assert_eq!(response.msg_type, MessageType::Diagnostics);
+    let payload = response
+        .diagnostics_payload()
+        .expect("diagnostics payload should parse");
+    assert_eq!(payload.len(), 1);
+    assert_eq!(payload[0].message, "Parse error");
+
+    bridge.kill().await.expect("bridge should be terminated");
 }

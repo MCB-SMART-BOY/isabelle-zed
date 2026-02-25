@@ -370,3 +370,80 @@ jobs:
           fi
           rm -f /tmp/isabelle.sock
           tail -n +1 /tmp/bridge.log 2>/dev/null || true
+
+  spawn-e2e-ndjson:
+    name: Spawn E2E (Bridge --adapter-command)
+    runs-on: ubuntu-latest
+    needs: [bridge]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build bridge
+        run: cargo build --manifest-path bridge/Cargo.toml --release
+
+      - name: Start bridge with adapter command (background)
+        run: |
+          ./bridge/target/release/bridge --socket /tmp/isabelle.sock --adapter-command "./bridge/target/release/bridge --mock-adapter" > /tmp/bridge.log 2>&1 &
+          echo $! > /tmp/bridge_pid
+
+      - name: Wait for bridge socket
+        run: |
+          for i in $(seq 1 80); do
+            if [ -S /tmp/isabelle.sock ]; then
+              exit 0
+            fi
+            sleep 0.1
+          done
+          echo "bridge socket was not created" >&2
+          exit 1
+
+      - name: Assert NDJSON flow through adapter-command mode
+        run: |
+          python3 - <<'PY'
+          import json
+          import socket
+
+          req = {
+              "id": "msg-0001",
+              "type": "document.push",
+              "session": "s1",
+              "version": 1,
+              "payload": {
+                  "uri": "file:///home/user/example.thy",
+                  "text": "theory Example imports Main begin\\nend\\n",
+              },
+          }
+
+          sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          sock.connect('/tmp/isabelle.sock')
+          sock.sendall((json.dumps(req) + "\\n").encode())
+
+          data = b''
+          while not data.endswith(b"\\n"):
+              chunk = sock.recv(4096)
+              if not chunk:
+                  break
+              data += chunk
+          sock.close()
+
+          if not data:
+              raise SystemExit('no response from bridge')
+
+          msg = json.loads(data.decode().strip())
+          assert msg["type"] == "diagnostics", msg
+          payload = msg["payload"]
+          assert isinstance(payload, list) and len(payload) == 1, payload
+          assert payload[0]["message"] == "Parse error", payload[0]
+          PY
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -f /tmp/bridge_pid ]; then
+            kill "$(cat /tmp/bridge_pid)" 2>/dev/null || true
+          fi
+          rm -f /tmp/isabelle.sock
+          tail -n +1 /tmp/bridge.log 2>/dev/null || true

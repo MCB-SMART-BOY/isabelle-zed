@@ -3,7 +3,7 @@ use bridge::protocol::{
     Message, MessageType, Position as BridgePosition, Severity, parse_message, to_ndjson,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -29,9 +29,11 @@ use tracing::{debug, error, info, warn};
 const DEFAULT_BRIDGE_SOCKET: &str = "/tmp/isabelle.sock";
 const DEFAULT_SESSION: &str = "s1";
 const DEFAULT_BRIDGE_AUTOSTART_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS: u64 = 12_000;
 
 const ENV_BRIDGE_AUTOSTART_CMD: &str = "ISABELLE_BRIDGE_AUTOSTART_CMD";
 const ENV_BRIDGE_AUTOSTART_TIMEOUT_MS: &str = "ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS";
+const ENV_BRIDGE_REQUEST_TIMEOUT_MS: &str = "ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS";
 
 const COMMAND_START_SESSION: &str = "isabelle.start_session";
 const COMMAND_STOP_SESSION: &str = "isabelle.stop_session";
@@ -43,6 +45,8 @@ enum BridgeError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("bridge request timed out after {timeout_ms}ms")]
+    Timeout { timeout_ms: u64 },
     #[error("bridge returned EOF")]
     Eof,
     #[error("invalid response from bridge: {0}")]
@@ -69,15 +73,17 @@ impl BridgeConnection {
 struct BridgeTransport {
     socket_path: PathBuf,
     session: String,
+    request_timeout: Duration,
     next_id: Arc<AtomicU64>,
     connection: Arc<Mutex<Option<BridgeConnection>>>,
 }
 
 impl BridgeTransport {
-    fn new(socket_path: PathBuf, session: String) -> Self {
+    fn new(socket_path: PathBuf, session: String, request_timeout: Duration) -> Self {
         Self {
             socket_path,
             session,
+            request_timeout,
             next_id: Arc::new(AtomicU64::new(1)),
             connection: Arc::new(Mutex::new(None)),
         }
@@ -114,47 +120,52 @@ impl BridgeTransport {
 
             let mut should_retry = false;
             if let Some(connection) = guard.as_mut() {
-                if let Err(err) = connection.writer.write_all(line.as_bytes()).await {
-                    *guard = None;
-                    if attempt == 0 {
-                        debug!("bridge write failed, reconnecting: {err}");
-                        should_retry = true;
-                    } else {
-                        return Err(BridgeError::Io(err));
-                    }
-                } else if let Err(err) = connection.writer.flush().await {
-                    *guard = None;
-                    if attempt == 0 {
-                        debug!("bridge flush failed, reconnecting: {err}");
-                        should_retry = true;
-                    } else {
-                        return Err(BridgeError::Io(err));
-                    }
-                } else {
+                let io_result = tokio::time::timeout(self.request_timeout, async {
+                    connection.writer.write_all(line.as_bytes()).await?;
+                    connection.writer.flush().await?;
                     let mut response = String::new();
-                    match connection.reader.read_line(&mut response).await {
-                        Ok(0) => {
-                            *guard = None;
-                            if attempt == 0 {
-                                debug!("bridge returned EOF, reconnecting");
-                                should_retry = true;
-                            } else {
-                                return Err(BridgeError::Eof);
-                            }
+                    let bytes_read = connection.reader.read_line(&mut response).await?;
+                    Ok::<(usize, String), std::io::Error>((bytes_read, response))
+                })
+                .await;
+
+                match io_result {
+                    Ok(Ok((0, _))) => {
+                        *guard = None;
+                        if attempt == 0 {
+                            debug!("bridge returned EOF, reconnecting");
+                            should_retry = true;
+                        } else {
+                            return Err(BridgeError::Eof);
                         }
-                        Ok(_) => {
-                            let parsed = parse_message(response.trim_end())
-                                .map_err(|err| BridgeError::InvalidResponse(err.to_string()))?;
-                            return Ok(parsed);
+                    }
+                    Ok(Ok((_, response))) => {
+                        let parsed = parse_message(response.trim_end())
+                            .map_err(|err| BridgeError::InvalidResponse(err.to_string()))?;
+                        return Ok(parsed);
+                    }
+                    Ok(Err(err)) => {
+                        *guard = None;
+                        if attempt == 0 {
+                            debug!("bridge I/O failed, reconnecting: {err}");
+                            should_retry = true;
+                        } else {
+                            return Err(BridgeError::Io(err));
                         }
-                        Err(err) => {
-                            *guard = None;
-                            if attempt == 0 {
-                                debug!("bridge read failed, reconnecting: {err}");
-                                should_retry = true;
-                            } else {
-                                return Err(BridgeError::Io(err));
-                            }
+                    }
+                    Err(_) => {
+                        *guard = None;
+                        if attempt == 0 {
+                            debug!(
+                                "bridge request timed out after {}ms, reconnecting",
+                                self.request_timeout.as_millis()
+                            );
+                            should_retry = true;
+                        } else {
+                            return Err(BridgeError::Timeout {
+                                timeout_ms: u64::try_from(self.request_timeout.as_millis())
+                                    .unwrap_or(u64::MAX),
+                            });
                         }
                     }
                 }
@@ -180,14 +191,21 @@ struct IsabelleLanguageServer {
     client: Client,
     bridge: BridgeTransport,
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
+    published_diagnostic_targets: Arc<RwLock<HashMap<Url, Vec<Url>>>>,
 }
 
 impl IsabelleLanguageServer {
-    fn new(client: Client, bridge_socket: PathBuf, session: String) -> Self {
+    fn new(
+        client: Client,
+        bridge_socket: PathBuf,
+        session: String,
+        request_timeout: Duration,
+    ) -> Self {
         Self {
             client,
-            bridge: BridgeTransport::new(bridge_socket, session),
+            bridge: BridgeTransport::new(bridge_socket, session, request_timeout),
             documents: Arc::new(RwLock::new(HashMap::new())),
+            published_diagnostic_targets: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -272,19 +290,58 @@ impl IsabelleLanguageServer {
         let payload = response
             .diagnostics_payload()
             .map_err(|err| err.to_string())?;
-        let diagnostics = payload
-            .iter()
-            .map(bridge_diagnostic_to_lsp)
-            .collect::<Vec<_>>();
+        let mut grouped: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
 
-        let params = PublishDiagnosticsParams {
-            uri,
-            diagnostics,
-            version: Some(i32::try_from(version).unwrap_or(i32::MAX)),
+        for diagnostic in &payload {
+            let target_uri = match Url::parse(&diagnostic.uri) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    warn!(
+                        "bridge diagnostic had invalid uri '{}': {err}; publishing to request uri",
+                        diagnostic.uri
+                    );
+                    uri.clone()
+                }
+            };
+
+            grouped
+                .entry(target_uri)
+                .or_default()
+                .push(bridge_diagnostic_to_lsp(diagnostic));
+        }
+
+        grouped.entry(uri.clone()).or_default();
+
+        let current_targets = grouped.keys().cloned().collect::<Vec<_>>();
+        let stale_targets = {
+            let mut state = self.published_diagnostic_targets.write().await;
+            let previous = state.get(&uri).cloned().unwrap_or_default();
+            state.insert(uri.clone(), current_targets.clone());
+            previous
         };
-        self.client
-            .publish_diagnostics(params.uri, params.diagnostics, params.version)
-            .await;
+
+        let current_target_set = current_targets.into_iter().collect::<HashSet<_>>();
+        let version = Some(i32::try_from(version).unwrap_or(i32::MAX));
+
+        for stale_uri in stale_targets {
+            if !current_target_set.contains(&stale_uri) {
+                self.client
+                    .publish_diagnostics(stale_uri, Vec::new(), version)
+                    .await;
+            }
+        }
+
+        for (target_uri, diagnostics) in grouped {
+            let params = PublishDiagnosticsParams {
+                uri: target_uri,
+                diagnostics,
+                version,
+            };
+            self.client
+                .publish_diagnostics(params.uri, params.diagnostics, params.version)
+                .await;
+        }
+
         Ok(())
     }
 
@@ -350,6 +407,17 @@ impl IsabelleLanguageServer {
     }
 
     async fn clear_diagnostics(&self) {
+        let stale_targets = {
+            let mut state = self.published_diagnostic_targets.write().await;
+            let all = state.values().flatten().cloned().collect::<Vec<_>>();
+            state.clear();
+            all
+        };
+
+        for uri in stale_targets {
+            self.client.publish_diagnostics(uri, Vec::new(), None).await;
+        }
+
         let uris = self
             .documents
             .read()
@@ -364,6 +432,17 @@ impl IsabelleLanguageServer {
     }
 
     async fn clear_diagnostics_for_uri(&self, uri: Url) {
+        let related_uris = {
+            let mut state = self.published_diagnostic_targets.write().await;
+            state.remove(&uri).unwrap_or_default()
+        };
+
+        for related_uri in related_uris {
+            self.client
+                .publish_diagnostics(related_uri, Vec::new(), None)
+                .await;
+        }
+
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
     }
 
@@ -546,12 +625,12 @@ fn bridge_diagnostic_to_lsp(diagnostic: &BridgeDiagnostic) -> Diagnostic {
 fn bridge_range_to_lsp(range: &bridge::protocol::Range) -> Range {
     Range {
         start: Position {
-            line: clamp_i64_to_u32(range.start.line),
-            character: clamp_i64_to_u32(range.start.col),
+            line: bridge_index_to_lsp(range.start.line),
+            character: bridge_index_to_lsp(range.start.col),
         },
         end: Position {
-            line: clamp_i64_to_u32(range.end.line),
-            character: clamp_i64_to_u32(range.end.col),
+            line: bridge_index_to_lsp(range.end.line),
+            character: bridge_index_to_lsp(range.end.col),
         },
     }
 }
@@ -564,12 +643,12 @@ fn bridge_severity_to_lsp(severity: Severity) -> DiagnosticSeverity {
     }
 }
 
-fn clamp_i64_to_u32(value: i64) -> u32 {
-    if value <= 0 {
+fn bridge_index_to_lsp(value: i64) -> u32 {
+    if value <= 1 {
         return 0;
     }
 
-    u32::try_from(value).unwrap_or(u32::MAX)
+    u32::try_from(value - 1).unwrap_or(u32::MAX)
 }
 
 fn command_target_uri(argument: Option<&Value>) -> Option<String> {
@@ -651,13 +730,23 @@ async fn main() {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_BRIDGE_SOCKET));
     let session = std::env::var("ISABELLE_SESSION").unwrap_or_else(|_| DEFAULT_SESSION.to_string());
+    let request_timeout = std::env::var(ENV_BRIDGE_REQUEST_TIMEOUT_MS)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS));
     let _bridge_child = autostart_bridge_if_needed(&bridge_socket).await;
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
     let (service, socket) = LspService::new(|client| {
-        IsabelleLanguageServer::new(client, bridge_socket.clone(), session.clone())
+        IsabelleLanguageServer::new(
+            client,
+            bridge_socket.clone(),
+            session.clone(),
+            request_timeout,
+        )
     });
 
     Server::new(stdin, stdout, socket).serve(service).await;
@@ -670,6 +759,7 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::net::UnixListener;
+    use tokio::time::sleep;
 
     #[test]
     fn converts_bridge_diagnostic_to_lsp() {
@@ -685,10 +775,10 @@ mod tests {
 
         let mapped = bridge_diagnostic_to_lsp(&diagnostic);
         assert_eq!(mapped.severity, Some(DiagnosticSeverity::WARNING));
-        assert_eq!(mapped.range.start.line, 1);
-        assert_eq!(mapped.range.start.character, 2);
-        assert_eq!(mapped.range.end.line, 3);
-        assert_eq!(mapped.range.end.character, 4);
+        assert_eq!(mapped.range.start.line, 0);
+        assert_eq!(mapped.range.start.character, 1);
+        assert_eq!(mapped.range.end.line, 2);
+        assert_eq!(mapped.range.end.character, 3);
         assert_eq!(mapped.message, "warning message");
     }
 
@@ -721,7 +811,7 @@ mod tests {
                 .expect("write diagnostics");
         });
 
-        let transport = BridgeTransport::new(socket_path, "s1".to_string());
+        let transport = BridgeTransport::new(socket_path, "s1".to_string(), Duration::from_secs(2));
         let payload = serde_json::to_value(DocumentPushPayload {
             uri: "file:///home/user/example.thy".to_string(),
             text: "theory Example imports Main begin\nend\n".to_string(),
@@ -741,6 +831,39 @@ mod tests {
         assert_eq!(diagnostics[0].message, "Parse error");
 
         server.await.expect("mock bridge server should finish");
+    }
+
+    #[tokio::test]
+    async fn bridge_transport_times_out_when_bridge_does_not_reply() {
+        let temp = tempdir().expect("tempdir");
+        let socket_path = temp.path().join("bridge-timeout.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.expect("accept connection");
+                let (read_half, _) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line).await;
+                sleep(Duration::from_millis(300)).await;
+            }
+        });
+
+        let transport =
+            BridgeTransport::new(socket_path, "s1".to_string(), Duration::from_millis(100));
+        let payload = serde_json::to_value(DocumentPushPayload {
+            uri: "file:///home/user/example.thy".to_string(),
+            text: "theory Example imports Main begin\nend\n".to_string(),
+        })
+        .expect("serialize payload");
+
+        let result = transport
+            .request(MessageType::DocumentPush, 1, payload)
+            .await;
+        assert!(matches!(result, Err(BridgeError::Timeout { .. })));
+
+        server.await.expect("timeout server should finish");
     }
 
     #[test]

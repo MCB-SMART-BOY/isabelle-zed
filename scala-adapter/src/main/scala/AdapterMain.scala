@@ -16,6 +16,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.Comparator
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.Executors
 import scala.collection.concurrent.TrieMap
 import scala.collection.mutable.ListBuffer
@@ -26,8 +27,6 @@ import scala.concurrent.blocking
 import scala.concurrent.duration.DurationInt
 import scala.sys.process.Process
 import scala.sys.process.ProcessLogger
-import scala.util.Failure
-import scala.util.Success
 import scala.util.Try
 import scala.util.matching.Regex
 
@@ -293,6 +292,8 @@ object AdapterMain {
   }
 
   private val workerPool = Executors.newFixedThreadPool(4)
+  private val MaxInFlightRequests = 64
+  private val ShutdownWait = 30.seconds
   given ExecutionContext = ExecutionContext.fromExecutor(workerPool)
 
   def main(args: Array[String]): Unit = {
@@ -372,19 +373,41 @@ object AdapterMain {
 
   private def streamLoop(reader: BufferedReader, writer: PrintWriter, service: AdapterService): Unit = {
     val inflight = ListBuffer.empty[Future[Unit]]
+
+    def pruneCompleted(): Unit = {
+      inflight.filterInPlace(!_.isCompleted)
+    }
+
+    def waitForCapacity(): Unit = {
+      pruneCompleted()
+      while (inflight.size >= MaxInFlightRequests) {
+        Await.ready(Future.firstCompletedOf(inflight.toList), duration = scala.concurrent.duration.Duration.Inf)
+        pruneCompleted()
+      }
+    }
+
     var line = reader.readLine()
     while (line != null) {
+      waitForCapacity()
       val pending = service.processLine(line, writer)
       inflight += pending
-      pending.onComplete {
-        case Success(_) => ()
-        case Failure(error) =>
-          System.err.println(s"Request processing failed: ${error.getMessage}")
-      }
+      pending.failed.foreach(error => System.err.println(s"Request processing failed: ${error.getMessage}"))
       line = reader.readLine()
     }
 
-    Await.result(Future.sequence(inflight.toList), 2.seconds)
+    pruneCompleted()
+    if (inflight.nonEmpty) {
+      try {
+        Await.result(Future.sequence(inflight.toList), ShutdownWait)
+      } catch {
+        case _: TimeoutException =>
+          System.err.println(
+            s"Timed out waiting for ${inflight.size} in-flight request(s) to finish during shutdown"
+          )
+        case error: Throwable =>
+          System.err.println(s"Request processing failed during shutdown: ${error.getMessage}")
+      }
+    }
   }
 
   private def parseSocketArg(value: String): Option[(String, Int)] =

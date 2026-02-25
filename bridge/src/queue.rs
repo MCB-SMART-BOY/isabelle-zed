@@ -40,9 +40,7 @@ impl DebounceQueue {
 
         let queued_at = Instant::now();
         match self.pending_by_uri.get_mut(&payload.uri) {
-            Some(existing) if existing.message.version > message.version => {
-                existing.queued_at = queued_at;
-            }
+            Some(existing) if existing.message.version > message.version => {}
             Some(existing) => {
                 existing.message = message;
                 existing.queued_at = queued_at;
@@ -78,6 +76,7 @@ impl DebounceQueue {
 mod tests {
     use super::DebounceQueue;
     use crate::protocol::{Message, MessageType};
+    use std::thread;
     use std::time::{Duration, Instant};
 
     fn push(uri: &str, version: i64, text: &str) -> Message {
@@ -131,5 +130,19 @@ mod tests {
             .unwrap();
 
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn stale_push_does_not_delay_newer_pending_message() {
+        let mut queue = DebounceQueue::new(60);
+        queue.enqueue(push("file:///a.thy", 2, "new")).unwrap();
+
+        thread::sleep(Duration::from_millis(40));
+        queue.enqueue(push("file:///a.thy", 1, "old")).unwrap();
+        thread::sleep(Duration::from_millis(30));
+
+        let ready = queue.drain_ready(Instant::now());
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].version, 2);
     }
 }

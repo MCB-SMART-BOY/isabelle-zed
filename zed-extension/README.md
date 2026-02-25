@@ -81,6 +81,7 @@ make release-package
 ```
 
 打包产物包含扩展清单与 wasm 文件，以及 `bridge` / `isabelle-zed-lsp` 二进制。
+同时包含根目录 `LICENSE` 与 `docs/CHANGELOG.md`。
 
 ### LSP 代理命令
 
@@ -172,6 +173,7 @@ make release-package
 ```
 
 The package includes extension manifest + wasm artifact and `bridge` / `isabelle-zed-lsp` binaries.
+It also includes root `LICENSE` and `docs/CHANGELOG.md`.
 
 ### LSP proxy commands
 

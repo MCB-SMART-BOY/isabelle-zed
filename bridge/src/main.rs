@@ -26,6 +26,9 @@ struct Args {
     #[arg(long)]
     adapter_socket: Option<String>,
 
+    #[arg(long)]
+    adapter_command: Option<String>,
+
     #[arg(long, default_value_t = 300)]
     debounce_ms: u64,
 
@@ -46,6 +49,7 @@ struct Args {
 struct SessionConfig {
     isabelle_path: String,
     adapter_socket: Option<String>,
+    adapter_command: Option<String>,
     debounce_ms: u64,
     mock: bool,
 }
@@ -72,6 +76,7 @@ async fn main() -> Result<(), BridgeError> {
     let session = SessionConfig {
         isabelle_path: args.isabelle_path,
         adapter_socket: args.adapter_socket,
+        adapter_command: args.adapter_command,
         debounce_ms: args.debounce_ms,
         mock: args.mock,
     };
@@ -166,8 +171,12 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut process =
-        ProcessManager::new(session.isabelle_path, session.mock, session.adapter_socket);
+    let mut process = ProcessManager::new(
+        session.isabelle_path,
+        session.mock,
+        session.adapter_socket,
+        session.adapter_command,
+    );
     process.start().await?;
     let mut adapter_output = process.take_output_receiver()?;
 
