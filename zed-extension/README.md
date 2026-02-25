@@ -31,11 +31,11 @@ make uninstall-zed-native
 默认快捷键：
 
 - `Alt-Shift-I`：检查当前 Theory（`process_theories`）
-- `Alt-Shift-B`：构建当前 worktree（`build -D`）
+- `Alt-Shift-B`：构建当前 worktree（存在 `ROOT/ROOTS` 时 `build -D`，否则回退 `process_theories -D`）
 - `Alt-I`：重跑上一次 Isabelle 任务
-- `Ctrl-Alt-J`：备用检查快捷键（避免系统占用 `Alt-Shift`）
-- `Ctrl-Alt-K`：备用构建快捷键（避免系统占用 `Alt-Shift`）
-- `Ctrl-Alt-L`：备用重跑快捷键
+- `F8`：备用检查快捷键（避免系统占用 `Alt-Shift`）
+- `F9`：备用构建快捷键（避免系统占用 `Alt-Shift`）
+- `F7`：备用重跑快捷键
 
 单独安装/卸载快捷键：
 
@@ -131,11 +131,11 @@ make uninstall-zed-native
 Default shortcuts:
 
 - `Alt-Shift-I`: check current theory (`process_theories`)
-- `Alt-Shift-B`: build current worktree (`build -D`)
+- `Alt-Shift-B`: build current worktree (`build -D` when `ROOT/ROOTS` exists, otherwise fallback to `process_theories -D`)
 - `Alt-I`: rerun latest Isabelle task
-- `Ctrl-Alt-J`: fallback check shortcut (when `Alt-Shift` is intercepted by OS)
-- `Ctrl-Alt-K`: fallback build shortcut (when `Alt-Shift` is intercepted by OS)
-- `Ctrl-Alt-L`: fallback rerun shortcut
+- `F8`: fallback check shortcut (when `Alt-Shift` is intercepted by OS)
+- `F9`: fallback build shortcut (when `Alt-Shift` is intercepted by OS)
+- `F7`: fallback rerun shortcut
 
 Install/uninstall shortcuts only:
 
