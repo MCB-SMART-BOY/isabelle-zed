@@ -46,7 +46,7 @@ block = """  // >>> isabelle shortcuts >>>
           \"reveal_target\": \"center\"
         }
       ],
-      \"ctrl-alt-i\": [
+      \"ctrl-alt-j\": [
         \"task::Spawn\",
         {
           \"task_name\": \"isabelle: check current theory (process_theories)\",
@@ -60,7 +60,7 @@ block = """  // >>> isabelle shortcuts >>>
           \"reveal_target\": \"center\"
         }
       ],
-      \"ctrl-alt-b\": [
+      \"ctrl-alt-k\": [
         \"task::Spawn\",
         {
           \"task_name\": \"isabelle: build worktree session (build -D)\",
@@ -68,7 +68,7 @@ block = """  // >>> isabelle shortcuts >>>
         }
       ],
       \"alt-i\": [\"task::Rerun\", { \"reevaluate_context\": true }],
-      \"ctrl-alt-r\": [\"task::Rerun\", { \"reevaluate_context\": true }]
+      \"ctrl-alt-l\": [\"task::Rerun\", { \"reevaluate_context\": true }]
     }
   }
   // <<< isabelle shortcuts <<<"""
