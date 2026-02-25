@@ -89,6 +89,12 @@ printf '%s\n' '{"id":"msg-0001","type":"document.push","session":"s1","version":
 cargo test
 ```
 
+仓库根目录也提供了真实启动链路的本地回归命令：
+
+```bash
+make spawn-e2e-ndjson
+```
+
 ## English
 
 `bridge` is a Rust NDJSON router between an editor client and an Isabelle Scala adapter process.
@@ -177,4 +183,10 @@ printf '%s\n' '{"id":"msg-0001","type":"document.push","session":"s1","version":
 
 ```bash
 cargo test
+```
+
+From repository root, a local real-startup regression is also available:
+
+```bash
+make spawn-e2e-ndjson
 ```

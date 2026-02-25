@@ -16,7 +16,7 @@ SHELL := /bin/bash
 	 release-package \
 	 bridge-mock-up bridge-mock-down \
 	 mock-bridge mock-bridge-adapter mock-adapter mock-send mock-lsp-e2e \
-	 native-lsp-smoke
+	 native-lsp-smoke spawn-e2e-ndjson
 
 bridge-build:
 	cargo build --manifest-path bridge/Cargo.toml
@@ -106,3 +106,7 @@ mock-lsp-e2e:
 
 native-lsp-smoke:
 	python3 scripts/native_lsp_smoke.py
+
+spawn-e2e-ndjson:
+	cargo build --manifest-path bridge/Cargo.toml
+	python3 scripts/spawn_e2e_ndjson.py

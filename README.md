@@ -132,6 +132,7 @@ make bridge-test
 make lsp-test
 make zed-check
 make native-lsp-smoke
+make spawn-e2e-ndjson
 ```
 
 ### Release 说明
@@ -271,6 +272,7 @@ make bridge-test
 make lsp-test
 make zed-check
 make native-lsp-smoke
+make spawn-e2e-ndjson
 ```
 
 ### Release notes
