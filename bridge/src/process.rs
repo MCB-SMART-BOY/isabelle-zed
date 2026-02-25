@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener as TokioTcpListener;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, ChildStdin, Command};
@@ -214,11 +215,79 @@ impl ProcessManager {
             )
         })?;
 
+        let listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|err| ProcessError::Connect(err.to_string()))?;
+        let address = listener
+            .local_addr()
+            .map_err(|err| ProcessError::Connect(err.to_string()))?;
+        drop(listener);
+
+        let socket_address = format!("{}:{}", address.ip(), address.port());
         let mut command = Command::new("sbt");
         command.current_dir(adapter_dir);
         command.arg("-batch");
-        command.arg(format!("run --isabelle-path={isabelle_path}"));
-        self.start_spawn(command).await
+        command.arg(format!(
+            "run --isabelle-path={isabelle_path} --socket={socket_address}"
+        ));
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        info!(
+            "starting adapter process (socket mode): {:?}, socket {}",
+            command, socket_address
+        );
+        let mut child = command
+            .spawn()
+            .map_err(|err| ProcessError::Spawn(err.to_string()))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProcessError::Spawn("failed to acquire child stdout".to_string()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ProcessError::Spawn("failed to acquire child stderr".to_string()))?;
+
+        self.spawn_stdout_log_reader(stdout);
+        self.spawn_stderr_reader(stderr);
+
+        let mut last_connect_error: Option<std::io::Error> = None;
+        let startup_timeout = Duration::from_secs(45);
+        let startup_start = tokio::time::Instant::now();
+        loop {
+            if startup_start.elapsed() > startup_timeout {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let detail = last_connect_error
+                    .map(|err| err.to_string())
+                    .unwrap_or_else(|| "adapter socket was not ready".to_string());
+                return Err(ProcessError::Connect(format!(
+                    "adapter socket {} not ready within {:?}: {}",
+                    socket_address, startup_timeout, detail
+                )));
+            }
+
+            match TcpStream::connect(&socket_address).await {
+                Ok(stream) => {
+                    let (reader, writer) = stream.into_split();
+                    self.writer = Some(AdapterWriter::Socket(writer));
+                    self.child = Some(child);
+                    self.spawn_socket_output_reader(reader);
+                    return Ok(());
+                }
+                Err(err) => {
+                    if let Some(status) = child.try_wait()? {
+                        return Err(ProcessError::ProcessExited(status.to_string()));
+                    }
+                    last_connect_error = Some(err);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
     }
 
     fn locate_scala_adapter_dir() -> Option<PathBuf> {
@@ -270,6 +339,24 @@ impl ProcessManager {
                         if output_tx.send(line).await.is_err() {
                             break;
                         }
+                    }
+                    Ok(None) => break,
+                    Err(err) => {
+                        error!("adapter stdout read error: {err}");
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn spawn_stdout_log_reader(&self, stdout: tokio::process::ChildStdout) {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        debug!("adapter stdout: {line}");
                     }
                     Ok(None) => break,
                     Err(err) => {
