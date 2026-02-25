@@ -64,6 +64,14 @@ if [ ! -f "$wasm_src" ]; then
   exit 1
 fi
 
+grammar_src_dir="$repo_root/zed-extension/grammars"
+grammar_src="$grammar_src_dir/isabelle.wasm"
+if [ ! -f "$grammar_src" ]; then
+  echo "missing grammar artifact: $grammar_src" >&2
+  echo "build it first: $repo_root/scripts/build_isabelle_grammar.sh" >&2
+  exit 1
+fi
+
 dest_dir="$extensions_dir/$extension_id"
 mkdir -p "$extensions_dir"
 rm -rf "$dest_dir"
@@ -79,10 +87,7 @@ mkdir -p "$dest_dir"
 cp "$repo_root/zed-extension/extension.toml" "$dest_dir/"
 cp "$wasm_src" "$dest_dir/extension.wasm"
 cp -R "$repo_root/zed-extension/languages" "$dest_dir/languages"
-
-if [ -d "$repo_root/zed-extension/grammars" ]; then
-  cp -R "$repo_root/zed-extension/grammars" "$dest_dir/grammars"
-fi
+cp -R "$grammar_src_dir" "$dest_dir/grammars"
 
 echo "Zed extension installed to: $dest_dir"
 if command -v isabelle >/dev/null 2>&1; then

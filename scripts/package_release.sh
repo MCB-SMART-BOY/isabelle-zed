@@ -47,6 +47,12 @@ cp "$repo_root/zed-extension/Cargo.toml" "$package_dir/zed-extension/"
 cp "$repo_root/zed-extension/README.md" "$package_dir/zed-extension/"
 cp -R "$repo_root/zed-extension/src" "$package_dir/zed-extension/src"
 cp -R "$repo_root/zed-extension/languages" "$package_dir/zed-extension/languages"
+if [ ! -f "$repo_root/zed-extension/grammars/isabelle.wasm" ]; then
+  echo "missing grammar artifact: $repo_root/zed-extension/grammars/isabelle.wasm" >&2
+  echo "build it first: $repo_root/scripts/build_isabelle_grammar.sh" >&2
+  exit 1
+fi
+cp -R "$repo_root/zed-extension/grammars" "$package_dir/zed-extension/grammars"
 cp "$repo_root/zed-extension/target/wasm32-wasip2/release/isabelle_zed_extension.wasm" \
   "$package_dir/zed-extension/extension.wasm"
 

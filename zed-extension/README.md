@@ -14,6 +14,11 @@ make install-zed-native
 同时会自动安装 Isabelle 快捷键到 Zed `keymap.json`（带标记块，支持卸载）。
 
 要求：`isabelle` 在 `PATH` 中可用。
+如果仓库里缺少 `zed-extension/grammars/isabelle.wasm`，先执行：
+
+```bash
+make build-isabelle-grammar
+```
 
 卸载：
 
@@ -81,7 +86,7 @@ make release-package
 ```
 
 打包产物包含扩展清单与 wasm 文件，以及 `bridge` / `isabelle-zed-lsp` 二进制。
-同时包含根目录 `LICENSE` 与 `docs/CHANGELOG.md`。
+同时包含根目录 `LICENSE`、`docs/CHANGELOG.md` 和 `zed-extension/grammars/isabelle.wasm`。
 
 ### LSP 代理命令
 
@@ -106,6 +111,11 @@ Default mode is `native`, so no manual `settings.json` edits are required.
 It also installs Isabelle keybindings into Zed `keymap.json` (with marker block for clean removal).
 
 Requirement: `isabelle` must be on `PATH`.
+If `zed-extension/grammars/isabelle.wasm` is missing, run:
+
+```bash
+make build-isabelle-grammar
+```
 
 Uninstall:
 
@@ -173,7 +183,7 @@ make release-package
 ```
 
 The package includes extension manifest + wasm artifact and `bridge` / `isabelle-zed-lsp` binaries.
-It also includes root `LICENSE` and `docs/CHANGELOG.md`.
+It also includes root `LICENSE`, `docs/CHANGELOG.md`, and `zed-extension/grammars/isabelle.wasm`.
 
 ### LSP proxy commands
 

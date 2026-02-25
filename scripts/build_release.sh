@@ -27,8 +27,15 @@ cargo build --manifest-path "$repo_root/isabelle-lsp/Cargo.toml" --release
 echo "Building Zed extension wasm (release)..."
 cargo build --manifest-path "$repo_root/zed-extension/Cargo.toml" --target wasm32-wasip2 --release
 
+grammar_artifact="$repo_root/zed-extension/grammars/isabelle.wasm"
+if [ ! -f "$grammar_artifact" ]; then
+  echo "Building Isabelle grammar artifact..."
+  "$repo_root/scripts/build_isabelle_grammar.sh"
+fi
+
 echo
 echo "Build complete:"
 echo "  bridge:            $repo_root/bridge/target/release/bridge"
 echo "  isabelle-zed-lsp:  $repo_root/isabelle-lsp/target/release/isabelle-zed-lsp"
 echo "  extension wasm:    $repo_root/zed-extension/target/wasm32-wasip2/release/isabelle_zed_extension.wasm"
+echo "  grammar wasm:      $grammar_artifact"

@@ -6,6 +6,7 @@ SHELL := /bin/bash
 	 lsp-build lsp-test lsp-clippy \
 	 zed-build zed-check \
 	 zed-official-check \
+	 build-isabelle-grammar \
 	 doctor \
 	 release-build \
 	 install-local \
@@ -47,6 +48,9 @@ zed-check:
 
 zed-official-check:
 	./scripts/zed_official_check.sh
+
+build-isabelle-grammar:
+	./scripts/build_isabelle_grammar.sh
 
 doctor:
 	./scripts/doctor.sh

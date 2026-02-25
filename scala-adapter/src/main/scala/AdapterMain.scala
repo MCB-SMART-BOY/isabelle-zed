@@ -381,7 +381,10 @@ object AdapterMain {
     def waitForCapacity(): Unit = {
       pruneCompleted()
       while (inflight.size >= MaxInFlightRequests) {
-        Await.ready(Future.firstCompletedOf(inflight.toList), duration = scala.concurrent.duration.Duration.Inf)
+        Await.ready(
+          Future.firstCompletedOf(inflight.toList),
+          atMost = scala.concurrent.duration.Duration.Inf
+        )
         pruneCompleted()
       }
     }

@@ -75,7 +75,7 @@ PR 描述建议包含：
 1. 在本仓库更新 `zed-extension/extension.toml` 的 `version`
 2. 更新 `CHANGELOG.md`
 3. 可选：打 tag / 发 release
-4. 通过 `make release-package` 生成发布包（包含 `LICENSE` 与 `docs/CHANGELOG.md`）
+4. 通过 `make release-package` 生成发布包（包含 `LICENSE`、`docs/CHANGELOG.md` 与 `zed-extension/grammars/isabelle.wasm`）
 5. 在你的 `extensions` fork 中更新：
    - `extensions/isabelle` 子模块提交
    - `extensions.toml` 里的 `[isabelle]` 版本
@@ -162,7 +162,7 @@ Recommended PR notes:
 1. Bump `version` in `zed-extension/extension.toml` in this repository
 2. Update `CHANGELOG.md`
 3. Optional: create tag/release
-4. Build release package via `make release-package` (includes `LICENSE` and `docs/CHANGELOG.md`)
+4. Build release package via `make release-package` (includes `LICENSE`, `docs/CHANGELOG.md`, and `zed-extension/grammars/isabelle.wasm`)
 5. In your fork of `extensions`, update:
    - `extensions/isabelle` submodule commit
    - `[isabelle]` version in `extensions.toml`

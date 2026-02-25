@@ -28,6 +28,11 @@ make install-zed-native
 然后重启 Zed（或重载扩展）并打开 `.thy` 文件即可使用。
 
 要求：`isabelle` 命令可在 `PATH` 中找到。
+如果仓库里缺少 `zed-extension/grammars/isabelle.wasm`，先执行：
+
+```bash
+make build-isabelle-grammar
+```
 
 该安装命令会同时安装 Isabelle 专用快捷键（写入 `keymap.json`，带标记块）。
 
@@ -131,6 +136,7 @@ bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
 make bridge-test
 make lsp-test
 make zed-check
+make build-isabelle-grammar
 make native-lsp-smoke
 make spawn-e2e-ndjson
 ```
@@ -138,6 +144,7 @@ make spawn-e2e-ndjson
 ### Release 说明
 
 - `make release-package` 会把根目录 `LICENSE` 一并打入发布包。
+- `make release-package` 会校验并打入 `zed-extension/grammars/isabelle.wasm`。
 - 发布版本号来自 `zed-extension/extension.toml` 的 `version` 字段。
 
 ## English
@@ -168,6 +175,11 @@ make install-zed-native
 Then restart Zed (or reload extensions) and open a `.thy` file.
 
 Requirement: `isabelle` must be available on `PATH`.
+If `zed-extension/grammars/isabelle.wasm` is missing, run:
+
+```bash
+make build-isabelle-grammar
+```
 
 This install command also installs Isabelle-specific shortcuts (inserted into `keymap.json` with marker comments).
 
@@ -271,6 +283,7 @@ bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
 make bridge-test
 make lsp-test
 make zed-check
+make build-isabelle-grammar
 make native-lsp-smoke
 make spawn-e2e-ndjson
 ```
@@ -278,4 +291,5 @@ make spawn-e2e-ndjson
 ### Release notes
 
 - `make release-package` now includes root `LICENSE` in the archive.
+- `make release-package` validates and includes `zed-extension/grammars/isabelle.wasm`.
 - Release version is read from `zed-extension/extension.toml` (`version`).

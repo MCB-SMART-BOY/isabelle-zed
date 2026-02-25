@@ -60,6 +60,12 @@ else
   warn "extension wasm artifact not found (run: make release-build)"
 fi
 
+if [ -f "$repo_root/zed-extension/grammars/isabelle.wasm" ]; then
+  ok "isabelle grammar wasm artifact is present"
+else
+  warn "isabelle grammar wasm artifact not found (run: ./scripts/build_isabelle_grammar.sh)"
+fi
+
 if [ -f "$repo_root/LICENSE" ]; then
   ok "repository license file is present"
 else

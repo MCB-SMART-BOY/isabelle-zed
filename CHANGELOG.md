@@ -4,9 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-02-25
+
 ### Added
 
 - local regression command `make spawn-e2e-ndjson` to validate bridge `--adapter-command` startup path end-to-end.
+- grammar build command `make build-isabelle-grammar` to generate `zed-extension/grammars/isabelle.wasm`.
+
+### Fixed
+
+- native install/package scripts now fail fast when `zed-extension/grammars/isabelle.wasm` is missing (no more silent broken installs).
+- release/install artifacts now include Isabelle grammar wasm, preventing `failed to load language Isabelle` at runtime.
+- Scala adapter `Await.ready` call now uses the correct `atMost` parameter so `make scala-test` compiles and runs cleanly.
 
 ## [0.2.1] - 2026-02-25
 
