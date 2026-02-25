@@ -46,6 +46,13 @@ block = """  // >>> isabelle shortcuts >>>
           \"reveal_target\": \"center\"
         }
       ],
+      \"ctrl-alt-i\": [
+        \"task::Spawn\",
+        {
+          \"task_name\": \"isabelle: check current theory (process_theories)\",
+          \"reveal_target\": \"center\"
+        }
+      ],
       \"alt-shift-b\": [
         \"task::Spawn\",
         {
@@ -53,7 +60,15 @@ block = """  // >>> isabelle shortcuts >>>
           \"reveal_target\": \"center\"
         }
       ],
-      \"alt-i\": [\"task::Rerun\", { \"reevaluate_context\": true }]
+      \"ctrl-alt-b\": [
+        \"task::Spawn\",
+        {
+          \"task_name\": \"isabelle: build worktree session (build -D)\",
+          \"reveal_target\": \"center\"
+        }
+      ],
+      \"alt-i\": [\"task::Rerun\", { \"reevaluate_context\": true }],
+      \"ctrl-alt-r\": [\"task::Rerun\", { \"reevaluate_context\": true }]
     }
   }
   // <<< isabelle shortcuts <<<"""
@@ -90,4 +105,3 @@ if not new_text.endswith("\n"):
 path.write_text(new_text, encoding="utf-8")
 print(f"Installed Isabelle shortcuts into existing keymap: {path}")
 PY
-
