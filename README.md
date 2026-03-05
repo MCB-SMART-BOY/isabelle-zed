@@ -76,6 +76,13 @@ make uninstall-zed-shortcuts
 
 仅在你需要覆盖默认行为时使用。
 
+Bridge 模式的自动拉起说明：
+
+- 出于安全考虑，`bridge_autostart_command` / `bridge_autostart_timeout_ms` 不再从工作区 `settings.json` 读取。
+- 如需自动拉起 bridge，请在启动 Zed 前通过环境变量设置：
+  - `ISABELLE_BRIDGE_AUTOSTART_CMD`
+  - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS`
+
 ### 提交到官方 Zed 扩展仓库
 
 先运行预检查：
@@ -131,6 +138,13 @@ sbt -batch "run --isabelle-path=isabelle"
 
 ```bash
 bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
+```
+
+如果你希望 `isabelle-zed-lsp` 自动拉起 bridge，请在启动 Zed 前设置（示例）：
+
+```bash
+export ISABELLE_BRIDGE_AUTOSTART_CMD='bridge --socket /tmp/isabelle.sock --mock'
+export ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS=10000
 ```
 
 ### 常用命令
@@ -226,6 +240,13 @@ These files are at repository root:
 
 Use them only when you need custom overrides.
 
+Bridge autostart configuration note:
+
+- For security hardening, `bridge_autostart_command` / `bridge_autostart_timeout_ms` are no longer read from workspace `settings.json`.
+- To enable bridge autostart, set environment variables before launching Zed:
+  - `ISABELLE_BRIDGE_AUTOSTART_CMD`
+  - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS`
+
 ### Submit to the official Zed registry
 
 Run pre-check first:
@@ -281,6 +302,13 @@ You can also provide an explicit startup command:
 
 ```bash
 bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
+```
+
+If you want `isabelle-zed-lsp` to autostart bridge, set these before launching Zed:
+
+```bash
+export ISABELLE_BRIDGE_AUTOSTART_CMD='bridge --socket /tmp/isabelle.sock --mock'
+export ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS=10000
 ```
 
 ### Common commands

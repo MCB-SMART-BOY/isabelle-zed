@@ -11,6 +11,11 @@
 - `textDocument/hover` -> `markup`
 - `diagnostics` 响应 -> `textDocument/publishDiagnostics`
 
+命令语义：
+
+- `isabelle.start_session`：恢复会话并触发一次检查
+- `isabelle.stop_session`：停止会话并清空诊断（后续 push/check/hover 会被忽略）
+
 ### 构建（在 `<repo-root>`）
 
 ```bash
@@ -28,7 +33,7 @@ ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
 
 - `ISABELLE_BRIDGE_SOCKET`（默认 `/tmp/isabelle.sock`）
 - `ISABELLE_SESSION`（默认 `s1`）
-- `ISABELLE_BRIDGE_AUTOSTART_CMD`（可选）：bridge socket 不存在时用于自动拉起 bridge 的命令行（按 argv 解析）
+- `ISABELLE_BRIDGE_AUTOSTART_CMD`（可选）：bridge socket 不存在时用于自动拉起 bridge 的命令行（按 argv 解析，不经 `bash -lc`）
 - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS`（默认 `5000`）
 - `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS`（默认 `12000`）：单次 bridge 请求超时时间，超时会重连重试一次
 
@@ -48,6 +53,11 @@ ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
 - `textDocument/hover` -> `markup`
 - `diagnostics` bridge responses -> `textDocument/publishDiagnostics`
 
+Command semantics:
+
+- `isabelle.start_session`: resume session and trigger one check
+- `isabelle.stop_session`: stop session and clear diagnostics (subsequent push/check/hover are ignored)
+
 ### Build (from `<repo-root>`)
 
 ```bash
@@ -65,7 +75,7 @@ Optional environment variables:
 
 - `ISABELLE_BRIDGE_SOCKET` (default: `/tmp/isabelle.sock`)
 - `ISABELLE_SESSION` (default: `s1`)
-- `ISABELLE_BRIDGE_AUTOSTART_CMD` (optional): command line used to auto-start bridge when socket is missing (parsed into argv)
+- `ISABELLE_BRIDGE_AUTOSTART_CMD` (optional): command line used to auto-start bridge when socket is missing (parsed into argv, without `bash -lc`)
 - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS` (default: `5000`)
 - `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS` (default: `12000`): per-request timeout for bridge calls, with one reconnect retry
 

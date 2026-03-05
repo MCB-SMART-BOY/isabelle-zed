@@ -73,6 +73,13 @@ make release-build
 - `examples/zed-settings-bridge-mock.json`
 - `examples/zed-keymap-isabelle.json`
 
+Bridge 自动拉起配置说明：
+
+- 出于安全原因，bridge 自动拉起参数不再从工作区 `settings.json` 注入到 LSP 进程。
+- 如需自动拉起 bridge，请在启动 Zed 前设置：
+  - `ISABELLE_BRIDGE_AUTOSTART_CMD`
+  - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS`
+
 ### 官方收录预检查
 
 ```bash
@@ -98,6 +105,7 @@ make release-package
 - `isabelle.run_check`
 
 这些命令由 `isabelle-zed-lsp` 的 `workspace/executeCommand` 处理。
+`stop_session` 会暂停后续 push/check/hover 请求；`start_session` 会恢复并触发一次检查。
 
 ## English
 
@@ -173,6 +181,13 @@ Example files are at repository root:
 - `examples/zed-settings-bridge-mock.json`
 - `examples/zed-keymap-isabelle.json`
 
+Bridge autostart configuration note:
+
+- For security reasons, bridge autostart settings are no longer injected from workspace `settings.json`.
+- To autostart bridge, set these environment variables before launching Zed:
+  - `ISABELLE_BRIDGE_AUTOSTART_CMD`
+  - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS`
+
 ### Official registry pre-check
 
 ```bash
@@ -198,3 +213,4 @@ It also includes root `LICENSE`, `docs/CHANGELOG.md`, and `zed-extension/grammar
 - `isabelle.run_check`
 
 These are handled in `workspace/executeCommand` by `isabelle-zed-lsp`.
+`stop_session` pauses subsequent push/check/hover requests; `start_session` resumes and triggers one check.
