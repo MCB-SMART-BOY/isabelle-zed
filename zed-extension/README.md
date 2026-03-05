@@ -31,7 +31,7 @@ make uninstall-zed-native
 默认快捷键：
 
 - `Alt-Shift-I`：检查当前 Theory（`process_theories`）
-- `Alt-Shift-B`：构建当前 worktree（存在 `ROOT/ROOTS` 时 `build -D`，否则回退 `process_theories -D`）
+- `Alt-Shift-B`：构建当前 worktree（`build -D`）
 - `Alt-I`：重跑上一次 Isabelle 任务
 - `F8`：备用检查快捷键（避免系统占用 `Alt-Shift`）
 - `F9`：备用构建快捷键（避免系统占用 `Alt-Shift`）
@@ -139,7 +139,7 @@ make uninstall-zed-native
 Default shortcuts:
 
 - `Alt-Shift-I`: check current theory (`process_theories`)
-- `Alt-Shift-B`: build current worktree (`build -D` when `ROOT/ROOTS` exists, otherwise fallback to `process_theories -D`)
+- `Alt-Shift-B`: build current worktree (`build -D`)
 - `Alt-I`: rerun latest Isabelle task
 - `F8`: fallback check shortcut (when `Alt-Shift` is intercepted by OS)
 - `F9`: fallback build shortcut (when `Alt-Shift` is intercepted by OS)

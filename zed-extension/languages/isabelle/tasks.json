@@ -12,10 +12,11 @@
   },
   {
     "label": "isabelle: build worktree session (build -D)",
-    "command": "bash",
+    "command": "isabelle",
     "args": [
-      "-lc",
-      "if [ -f \"$ZED_WORKTREE_ROOT/ROOT\" ] || [ -f \"$ZED_WORKTREE_ROOT/ROOTS\" ]; then isabelle build -D \"$ZED_WORKTREE_ROOT\"; else isabelle process_theories -D \"$ZED_WORKTREE_ROOT\"; fi"
+      "build",
+      "-D",
+      "$ZED_WORKTREE_ROOT"
     ],
     "cwd": "$ZED_WORKTREE_ROOT"
   }
