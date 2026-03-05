@@ -28,7 +28,7 @@ fn diagnostics_parses_exact_example() {
     assert_eq!(payload[0].severity, Severity::Error);
     assert_eq!(payload[0].message, "Parse error");
     assert_eq!(payload[0].range.start.line, 1);
-    assert_eq!(payload[0].range.end.col, 6);
+    assert_eq!(payload[0].range.end.col, 7);
 }
 
 #[test]

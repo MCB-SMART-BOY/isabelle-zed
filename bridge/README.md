@@ -62,7 +62,7 @@ Mock 模式（CI / 本地可复现测试）：
 ```
 
 ```json
-{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}
+{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":1},"end":{"line":1,"col":7}},"severity":"error","message":"Parse error"}]}
 ```
 
 ### 调试日志
@@ -158,7 +158,7 @@ locate `scala-adapter/build.sbt` in the local repository and launches:
 ```
 
 ```json
-{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}
+{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":1},"end":{"line":1,"col":7}},"severity":"error","message":"Parse error"}]}
 ```
 
 ### Debug logging

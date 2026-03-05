@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const DOCUMENT_PUSH_EXAMPLE: &str = r#"{"id":"msg-0001","type":"document.push","session":"s1","version":1,"payload":{"uri":"file:///home/user/example.thy","text":"theory Example imports Main begin\nend\n"}}"#;
-pub const DIAGNOSTICS_EXAMPLE: &str = r#"{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":0},"end":{"line":1,"col":6}},"severity":"error","message":"Parse error"}]}"#;
+pub const DIAGNOSTICS_EXAMPLE: &str = r#"{"id":"msg-0001","type":"diagnostics","session":"s1","version":1,"payload":[{"uri":"file:///home/user/example.thy","range":{"start":{"line":1,"col":1},"end":{"line":1,"col":7}},"severity":"error","message":"Parse error"}]}"#;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MessageType {
@@ -137,8 +137,8 @@ pub fn diagnostics_message_from_request(
     let diagnostics = vec![Diagnostic {
         uri: uri.to_string(),
         range: Range {
-            start: Position { line: 1, col: 0 },
-            end: Position { line: 1, col: 6 },
+            start: Position { line: 1, col: 1 },
+            end: Position { line: 1, col: 7 },
         },
         severity,
         message: message.to_string(),

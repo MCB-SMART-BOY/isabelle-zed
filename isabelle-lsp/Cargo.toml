@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 bridge = { package = "isabelle-bridge", path = "../bridge" }
 serde_json = "=1.0.128"
+shell-words = "=1.1.0"
 thiserror = "=1.0.64"
 tokio = { version = "=1.40.0", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "sync"] }
 tower-lsp = "=0.20.0"

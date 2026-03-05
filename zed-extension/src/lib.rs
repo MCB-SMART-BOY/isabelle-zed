@@ -173,22 +173,6 @@ fn resolve_environment(
             ensure_env_var(&mut env, ENV_BRIDGE_SOCKET, bridge_socket);
             ensure_env_var(&mut env, ENV_SESSION, session);
 
-            if let Some(command) =
-                setting_string(settings_json, SETTINGS_KEY_BRIDGE_AUTOSTART_COMMAND)
-            {
-                upsert_env_var(&mut env, ENV_BRIDGE_AUTOSTART_CMD.to_string(), command);
-            }
-
-            if let Some(timeout_ms) =
-                setting_u64(settings_json, SETTINGS_KEY_BRIDGE_AUTOSTART_TIMEOUT_MS)
-            {
-                upsert_env_var(
-                    &mut env,
-                    ENV_BRIDGE_AUTOSTART_TIMEOUT_MS.to_string(),
-                    timeout_ms.to_string(),
-                );
-            }
-
             env
         }
     }
@@ -200,11 +184,18 @@ fn merge_environment(
 ) -> Vec<(String, String)> {
     if let Some(overrides) = overrides {
         for (key, value) in overrides {
+            if is_restricted_override_env_var(&key) {
+                continue;
+            }
             upsert_env_var(&mut base, key, value);
         }
     }
 
     base
+}
+
+fn is_restricted_override_env_var(key: &str) -> bool {
+    key == ENV_BRIDGE_AUTOSTART_CMD || key == ENV_BRIDGE_AUTOSTART_TIMEOUT_MS
 }
 
 fn upsert_env_var(env: &mut Vec<(String, String)>, key: String, value: String) {
@@ -237,13 +228,6 @@ fn setting_bool(settings_json: &Option<Value>, key: &str) -> Option<bool> {
         .as_ref()
         .and_then(|value| value.get(key))
         .and_then(Value::as_bool)
-}
-
-fn setting_u64(settings_json: &Option<Value>, key: &str) -> Option<u64> {
-    settings_json
-        .as_ref()
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_u64)
 }
 
 fn setting_string_array(settings_json: &Option<Value>, key: &str) -> Vec<String> {
@@ -332,5 +316,37 @@ mod tests {
         });
 
         assert_eq!(strip_control_settings(input), None);
+    }
+
+    #[test]
+    fn merge_environment_ignores_autostart_env_overrides() {
+        let base = vec![(
+            ENV_BRIDGE_AUTOSTART_CMD.to_string(),
+            "bridge --socket /tmp/isabelle.sock".to_string(),
+        )];
+        let overrides = Some(HashMap::from([
+            (
+                ENV_BRIDGE_AUTOSTART_CMD.to_string(),
+                "malicious-command".to_string(),
+            ),
+            (ENV_BRIDGE_AUTOSTART_TIMEOUT_MS.to_string(), "1".to_string()),
+            ("ISABELLE_SESSION".to_string(), "s2".to_string()),
+        ]));
+
+        let merged = merge_environment(base, overrides);
+        assert!(merged.iter().any(|(k, v)| {
+            k == ENV_BRIDGE_AUTOSTART_CMD && v == "bridge --socket /tmp/isabelle.sock"
+        }));
+        assert!(
+            !merged
+                .iter()
+                .any(|(k, v)| k == ENV_BRIDGE_AUTOSTART_CMD && v == "malicious-command")
+        );
+        assert!(
+            !merged
+                .iter()
+                .any(|(k, _)| k == ENV_BRIDGE_AUTOSTART_TIMEOUT_MS)
+        );
+        assert!(merged.iter().any(|(k, v)| k == ENV_SESSION && v == "s2"));
     }
 }

@@ -3,6 +3,7 @@ use bridge::protocol::{
     Message, MessageType, Position as BridgePosition, Severity, parse_message, to_ndjson,
 };
 use serde_json::Value;
+use shell_words::split as split_shell_words;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -111,6 +112,8 @@ impl BridgeTransport {
         let line =
             to_ndjson(&request).map_err(|err| BridgeError::InvalidResponse(err.to_string()))?;
 
+        let request_id = request.id.clone();
+
         // Retry once after reconnecting if the bridge closes the socket mid-request.
         for attempt in 0..2 {
             let mut guard = self.connection.lock().await;
@@ -123,14 +126,31 @@ impl BridgeTransport {
                 let io_result = tokio::time::timeout(self.request_timeout, async {
                     connection.writer.write_all(line.as_bytes()).await?;
                     connection.writer.flush().await?;
-                    let mut response = String::new();
-                    let bytes_read = connection.reader.read_line(&mut response).await?;
-                    Ok::<(usize, String), std::io::Error>((bytes_read, response))
+                    loop {
+                        let mut response = String::new();
+                        let bytes_read = connection.reader.read_line(&mut response).await?;
+                        if bytes_read == 0 {
+                            return Ok::<Option<Message>, std::io::Error>(None);
+                        }
+
+                        let parsed = parse_message(response.trim_end()).map_err(|err| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+                        })?;
+
+                        if parsed.id == request_id {
+                            return Ok(Some(parsed));
+                        }
+
+                        warn!(
+                            "ignoring bridge response with unexpected id: expected {}, got {}",
+                            request_id, parsed.id
+                        );
+                    }
                 })
                 .await;
 
                 match io_result {
-                    Ok(Ok((0, _))) => {
+                    Ok(Ok(None)) => {
                         *guard = None;
                         if attempt == 0 {
                             debug!("bridge returned EOF, reconnecting");
@@ -139,12 +159,14 @@ impl BridgeTransport {
                             return Err(BridgeError::Eof);
                         }
                     }
-                    Ok(Ok((_, response))) => {
-                        let parsed = parse_message(response.trim_end())
-                            .map_err(|err| BridgeError::InvalidResponse(err.to_string()))?;
+                    Ok(Ok(Some(parsed))) => {
                         return Ok(parsed);
                     }
                     Ok(Err(err)) => {
+                        if err.kind() == std::io::ErrorKind::InvalidData {
+                            return Err(BridgeError::InvalidResponse(err.to_string()));
+                        }
+
                         *guard = None;
                         if attempt == 0 {
                             debug!("bridge I/O failed, reconnecting: {err}");
@@ -192,6 +214,7 @@ struct IsabelleLanguageServer {
     bridge: BridgeTransport,
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
     published_diagnostic_targets: Arc<RwLock<HashMap<Url, Vec<Url>>>>,
+    session_running: Arc<RwLock<bool>>,
 }
 
 impl IsabelleLanguageServer {
@@ -206,7 +229,21 @@ impl IsabelleLanguageServer {
             bridge: BridgeTransport::new(bridge_socket, session, request_timeout),
             documents: Arc::new(RwLock::new(HashMap::new())),
             published_diagnostic_targets: Arc::new(RwLock::new(HashMap::new())),
+            session_running: Arc::new(RwLock::new(true)),
         }
+    }
+
+    async fn is_session_running(&self) -> bool {
+        *self.session_running.read().await
+    }
+
+    async fn start_session(&self) -> Result<(), String> {
+        *self.session_running.write().await = true;
+        self.run_check_command(None).await
+    }
+
+    async fn stop_session(&self) {
+        *self.session_running.write().await = false;
     }
 
     async fn upsert_document(&self, item: TextDocumentItem) {
@@ -241,6 +278,10 @@ impl IsabelleLanguageServer {
     }
 
     async fn push_document(&self, uri: &Url, version: i64, text: String) -> Result<(), String> {
+        if !self.is_session_running().await {
+            return Ok(());
+        }
+
         let payload = serde_json::to_value(DocumentPushPayload {
             uri: uri.to_string(),
             text,
@@ -258,6 +299,10 @@ impl IsabelleLanguageServer {
     }
 
     async fn check_document(&self, uri: &Url, version: i64) -> Result<(), String> {
+        if !self.is_session_running().await {
+            return Err("isabelle session is stopped".to_string());
+        }
+
         let payload = serde_json::to_value(DocumentCheckPayload {
             uri: uri.to_string(),
             version,
@@ -351,6 +396,10 @@ impl IsabelleLanguageServer {
         position: Position,
         version: i64,
     ) -> Result<Option<Hover>, String> {
+        if !self.is_session_running().await {
+            return Ok(None);
+        }
+
         let payload = serde_json::to_value(MarkupPayload {
             uri: uri.to_string(),
             offset: BridgePosition {
@@ -383,6 +432,10 @@ impl IsabelleLanguageServer {
     }
 
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
+        if !self.is_session_running().await {
+            return Err("isabelle session is stopped".to_string());
+        }
+
         let targets = if let Some(uri) = target_uri {
             let parsed = Url::parse(&uri).map_err(|err| err.to_string())?;
             if let Some(state) = self.document_snapshot(&parsed).await {
@@ -580,12 +633,14 @@ impl LanguageServer for IsabelleLanguageServer {
 
         let result = match command {
             COMMAND_START_SESSION => {
+                let start_result = self.start_session().await;
                 self.client
                     .log_message(LspMessageType::INFO, "Isabelle session started")
                     .await;
-                Ok(())
+                start_result
             }
             COMMAND_STOP_SESSION => {
+                self.stop_session().await;
                 self.clear_diagnostics().await;
                 self.client
                     .log_message(LspMessageType::INFO, "Isabelle session stopped")
@@ -663,6 +718,15 @@ fn command_target_uri(argument: Option<&Value>) -> Option<String> {
     }
 }
 
+fn parse_autostart_command(command: &str) -> Result<(String, Vec<String>), String> {
+    let parts = split_shell_words(command).map_err(|err| err.to_string())?;
+    if parts.is_empty() {
+        return Err("autostart command is empty".to_string());
+    }
+
+    Ok((parts[0].clone(), parts[1..].to_vec()))
+}
+
 async fn autostart_bridge_if_needed(socket_path: &Path) -> Option<Child> {
     if socket_path.exists() {
         return None;
@@ -673,10 +737,17 @@ async fn autostart_bridge_if_needed(socket_path: &Path) -> Option<Child> {
         return None;
     }
 
-    info!("autostarting bridge via command: {command}");
-    let child = match Command::new("bash")
-        .arg("-lc")
-        .arg(command)
+    let (program, args) = match parse_autostart_command(&command) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            error!("invalid bridge autostart command: {err}");
+            return None;
+        }
+    };
+
+    info!("autostarting bridge via command: {} {:?}", program, args);
+    let child = match Command::new(&program)
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -834,6 +905,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_transport_ignores_unmatched_response_ids() {
+        let temp = tempdir().expect("tempdir");
+        let socket_path = temp.path().join("bridge-mismatch-id.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept connection");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.expect("read request");
+
+            let request = parse_message(line.trim_end()).expect("parse request");
+
+            let wrong_response = Message {
+                id: "msg-9999".to_string(),
+                msg_type: MessageType::Diagnostics,
+                session: request.session.clone(),
+                version: request.version,
+                payload: request.payload.clone(),
+            };
+
+            let ndjson = to_ndjson(&wrong_response).expect("serialize wrong response");
+            write_half
+                .write_all(ndjson.as_bytes())
+                .await
+                .expect("write wrong response");
+
+            let response = diagnostics_message_from_request(
+                &request,
+                "file:///home/user/example.thy",
+                Severity::Error,
+                "Parse error",
+            )
+            .expect("build diagnostics response");
+            let ndjson = to_ndjson(&response).expect("serialize diagnostics response");
+            write_half
+                .write_all(ndjson.as_bytes())
+                .await
+                .expect("write diagnostics");
+        });
+
+        let transport = BridgeTransport::new(socket_path, "s1".to_string(), Duration::from_secs(2));
+        let payload = serde_json::to_value(DocumentPushPayload {
+            uri: "file:///home/user/example.thy".to_string(),
+            text: "theory Example imports Main begin\nend\n".to_string(),
+        })
+        .expect("serialize payload");
+
+        let response = transport
+            .request(MessageType::DocumentPush, 1, payload)
+            .await
+            .expect("request must succeed");
+        assert_eq!(response.id, "msg-0001");
+        assert_eq!(response.msg_type, MessageType::Diagnostics);
+
+        server.await.expect("mock bridge server should finish");
+    }
+
+    #[tokio::test]
     async fn bridge_transport_times_out_when_bridge_does_not_reply() {
         let temp = tempdir().expect("tempdir");
         let socket_path = temp.path().join("bridge-timeout.sock");
@@ -880,5 +1011,29 @@ mod tests {
 
         assert_eq!(command_target_uri(Some(&json!(42))), None);
         assert_eq!(command_target_uri(None), None);
+    }
+
+    #[test]
+    fn parses_autostart_command_with_quoted_arguments() {
+        let (program, args) = parse_autostart_command(
+            "bridge --socket /tmp/isabelle.sock --adapter-command \"bridge --mock-adapter\"",
+        )
+        .expect("command should parse");
+
+        assert_eq!(program, "bridge");
+        assert_eq!(
+            args,
+            vec![
+                "--socket".to_string(),
+                "/tmp/isabelle.sock".to_string(),
+                "--adapter-command".to_string(),
+                "bridge --mock-adapter".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_empty_autostart_command() {
+        assert!(parse_autostart_command("   ").is_err());
     }
 }

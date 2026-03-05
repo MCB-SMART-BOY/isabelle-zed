@@ -2,6 +2,8 @@ use bridge::process::{ProcessError, ProcessManager, run_mock_adapter};
 use bridge::protocol::{MessageType, parse_message};
 use bridge::queue::{DebounceQueue, QueueError};
 use clap::Parser;
+use std::io::ErrorKind;
+use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
@@ -131,7 +133,18 @@ async fn run_socket_server(
     session: SessionConfig,
 ) -> Result<(), BridgeError> {
     if socket_path.exists() {
-        std::fs::remove_file(socket_path)?;
+        let metadata = std::fs::symlink_metadata(socket_path)?;
+        if metadata.file_type().is_socket() {
+            std::fs::remove_file(socket_path)?;
+        } else {
+            return Err(BridgeError::Io(std::io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "refusing to remove non-socket path before bind: {}",
+                    socket_path.display()
+                ),
+            )));
+        }
     }
 
     let listener = UnixListener::bind(socket_path)?;
@@ -210,6 +223,9 @@ where
                         }
                     }
                     Ok(None) => {
+                        for message in debounce.drain_all() {
+                            process.send(&message).await?;
+                        }
                         break;
                     }
                     Err(err) => {

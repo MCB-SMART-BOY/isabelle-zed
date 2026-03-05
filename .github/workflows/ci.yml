@@ -186,8 +186,8 @@ jobs:
           assert isinstance(payload, list) and len(payload) == 1, payload
           diag = payload[0]
           assert diag["uri"] == "file:///home/user/example.thy", diag
-          assert diag["range"]["start"] == {"line": 1, "col": 0}, diag
-          assert diag["range"]["end"] == {"line": 1, "col": 6}, diag
+          assert diag["range"]["start"] == {"line": 1, "col": 1}, diag
+          assert diag["range"]["end"] == {"line": 1, "col": 7}, diag
           assert diag["severity"] == "error", diag
           assert diag["message"] == "Parse error", diag
           PY

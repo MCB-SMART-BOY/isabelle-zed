@@ -67,6 +67,13 @@ impl DebounceQueue {
         ready
     }
 
+    pub fn drain_all(&mut self) -> Vec<Message> {
+        self.pending_by_uri
+            .drain()
+            .map(|(_, pending)| pending.message)
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.pending_by_uri.is_empty()
     }
@@ -144,5 +151,16 @@ mod tests {
         let ready = queue.drain_ready(Instant::now());
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].version, 2);
+    }
+
+    #[test]
+    fn drain_all_returns_pending_messages_immediately() {
+        let mut queue = DebounceQueue::new(10_000);
+        queue.enqueue(push("file:///a.thy", 1, "a")).unwrap();
+        queue.enqueue(push("file:///b.thy", 1, "b")).unwrap();
+
+        let drained = queue.drain_all();
+        assert_eq!(drained.len(), 2);
+        assert!(queue.is_empty());
     }
 }

@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- hardened bridge autostart execution by parsing `ISABELLE_BRIDGE_AUTOSTART_CMD` into argv and spawning directly (removed `bash -lc` execution path).
+- ignored bridge autostart environment overrides from extension settings, so workspace LSP settings cannot inject autostart commands.
+- `isabelle-zed-lsp` bridge transport now validates response `id` and ignores out-of-order/unmatched responses.
+- normalized bridge/adapter diagnostic examples and mock payloads to 1-based positions (`line`/`col`), consistent with documented protocol semantics.
+- build task `isabelle: build worktree session (build -D)` now executes `isabelle build -D` when `ROOT/ROOTS` exists, with fallback to `process_theories -D`.
+- bridge now flushes pending debounced `document.push` messages before session shutdown on input EOF.
+- bridge socket startup now refuses to delete pre-existing non-socket paths.
+- root-level `cargo test` now works by adding a placeholder crate target (`src/lib.rs`).
+
 ## [0.2.2] - 2026-02-25
 
 ### Added

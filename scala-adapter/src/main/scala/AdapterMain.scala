@@ -52,8 +52,8 @@ object AdapterMain {
           Diagnostic(
             uri = uri,
             range = Range(
-              start = Position(safeLine, 0),
-              end = Position(safeLine, 1)
+              start = Position(safeLine, 1),
+              end = Position(safeLine, 2)
             ),
             severity = "error",
             message = message.trim
@@ -71,7 +71,7 @@ object AdapterMain {
         List(
           Diagnostic(
             uri = uri,
-            range = Range(Position(1, 0), Position(1, 1)),
+            range = Range(Position(1, 1), Position(1, 2)),
             severity = "error",
             message = fallbackMessage
           )
@@ -110,7 +110,7 @@ object AdapterMain {
       List(
         Diagnostic(
           uri = uri,
-          range = Range(start = Position(1, 0), end = Position(1, 6)),
+          range = Range(start = Position(1, 1), end = Position(1, 7)),
           severity = "error",
           message = "Parse error"
         )
@@ -147,7 +147,7 @@ object AdapterMain {
           List(
             Diagnostic(
               uri = uri,
-              range = Range(Position(1, 0), Position(1, 1)),
+              range = Range(Position(1, 1), Position(1, 2)),
               severity = "warning",
               message = "No theory text available for check"
             )

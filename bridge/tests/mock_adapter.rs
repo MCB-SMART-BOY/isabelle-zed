@@ -247,8 +247,8 @@ for raw in sys.stdin:
         "payload": [{
             "uri": uri,
             "range": {
-                "start": {"line": 1, "col": 0},
-                "end": {"line": 1, "col": 6},
+                "start": {"line": 1, "col": 1},
+                "end": {"line": 1, "col": 7},
             },
             "severity": "error",
             "message": "Parse error",
