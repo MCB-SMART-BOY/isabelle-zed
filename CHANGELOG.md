@@ -4,16 +4,25 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-03-05
+
+### Added
+
+- conflict-aware shortcut installer now auto-selects non-conflicting key candidates and supports `ISABELLE_ZED_RESERVED_KEYS`.
+
 ### Fixed
 
 - hardened bridge autostart execution by parsing `ISABELLE_BRIDGE_AUTOSTART_CMD` into argv and spawning directly (removed `bash -lc` execution path).
 - ignored bridge autostart environment overrides from extension settings, so workspace LSP settings cannot inject autostart commands.
 - `isabelle-zed-lsp` bridge transport now validates response `id` and ignores out-of-order/unmatched responses.
 - normalized bridge/adapter diagnostic examples and mock payloads to 1-based positions (`line`/`col`), consistent with documented protocol semantics.
-- build task `isabelle: build worktree session (build -D)` now executes `isabelle build -D` when `ROOT/ROOTS` exists, with fallback to `process_theories -D`.
+- build task `isabelle: build worktree session (build -D)` now runs `isabelle build -D` directly (shell-agnostic across fish/bash/zsh).
 - bridge now flushes pending debounced `document.push` messages before session shutdown on input EOF.
 - bridge socket startup now refuses to delete pre-existing non-socket paths.
 - root-level `cargo test` now works by adding a placeholder crate target (`src/lib.rs`).
+- `isabelle.start_session` / `isabelle.stop_session` now control effective request flow (stop pauses push/check/hover; start resumes and triggers one check).
+- check/build task invocations now prefer reusing an existing terminal session instead of opening a new terminal each run.
+- release packaging now performs preflight file checks before heavy builds and emits timestamped stage logs for clearer CI progress.
 
 ## [0.2.2] - 2026-02-25
 

@@ -4,6 +4,18 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dist_dir="$repo_root/dist"
 
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+require_file() {
+  local path="$1"
+  if [ ! -f "$path" ]; then
+    echo "missing required file: $path" >&2
+    exit 1
+  fi
+}
+
 platform=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -24,18 +36,36 @@ if [ -z "$platform" ]; then
   platform="${os}-${arch}"
 fi
 
+log "Running release preflight checks..."
+require_file "$repo_root/README.md"
+require_file "$repo_root/CHANGELOG.md"
+require_file "$repo_root/LICENSE"
+require_file "$repo_root/zed-extension/extension.toml"
+require_file "$repo_root/zed-extension/README.md"
+require_file "$repo_root/zed-extension/Cargo.toml"
+if [ ! -d "$repo_root/zed-extension/languages" ]; then
+  echo "missing required directory: $repo_root/zed-extension/languages" >&2
+  exit 1
+fi
+if [ ! -d "$repo_root/examples" ]; then
+  echo "missing required directory: $repo_root/examples" >&2
+  exit 1
+fi
+
 version="$(awk -F'"' '/^version = / {print $2; exit}' "$repo_root/zed-extension/extension.toml")"
 if [ -z "$version" ]; then
   echo "failed to read version from zed-extension/extension.toml" >&2
   exit 1
 fi
 
+log "Building release artifacts..."
 "$repo_root/scripts/build_release.sh"
 
 package_root="isabelle-zed-v${version}-${platform}"
 package_dir="$dist_dir/$package_root"
 archive_path="$dist_dir/${package_root}.tar.gz"
 
+log "Preparing package layout: $package_root"
 rm -rf "$package_dir"
 mkdir -p "$package_dir/bin" "$package_dir/zed-extension" "$package_dir/examples" "$package_dir/docs"
 
@@ -63,6 +93,7 @@ cp "$repo_root/README.md" "$package_dir/docs/README.md"
 cp "$repo_root/CHANGELOG.md" "$package_dir/docs/CHANGELOG.md"
 cp "$repo_root/LICENSE" "$package_dir/LICENSE"
 
+log "Creating tarball and checksum..."
 rm -f "$archive_path"
 tar -C "$dist_dir" -czf "$archive_path" "$package_root"
 
@@ -71,6 +102,6 @@ tar -C "$dist_dir" -czf "$archive_path" "$package_root"
   sha256sum "$(basename "$archive_path")" > "$(basename "$archive_path").sha256"
 )
 
-echo "Release package created:"
+log "Release package created:"
 echo "  $archive_path"
 echo "  $archive_path.sha256"
