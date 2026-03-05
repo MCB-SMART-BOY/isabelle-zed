@@ -6,28 +6,28 @@
         "task::Spawn",
         {
           "task_name": "isabelle: check current theory (process_theories)",
-          "reveal_target": "center"
+          "reveal_target": "dock"
         }
       ],
       "f8": [
         "task::Spawn",
         {
           "task_name": "isabelle: check current theory (process_theories)",
-          "reveal_target": "center"
+          "reveal_target": "dock"
         }
       ],
       "alt-shift-b": [
         "task::Spawn",
         {
           "task_name": "isabelle: build worktree session (build -D)",
-          "reveal_target": "center"
+          "reveal_target": "dock"
         }
       ],
       "f9": [
         "task::Spawn",
         {
           "task_name": "isabelle: build worktree session (build -D)",
-          "reveal_target": "center"
+          "reveal_target": "dock"
         }
       ],
       "alt-i": ["task::Rerun", { "reevaluate_context": true }],

@@ -118,7 +118,7 @@ def spawn_binding(task_name: str) -> str:
         "        \"task::Spawn\",\n"
         "        {\n"
         f"          \"task_name\": \"{task_name}\",\n"
-        "          \"reveal_target\": \"center\"\n"
+        "          \"reveal_target\": \"dock\"\n"
         "        }\n"
         "      ]"
     )

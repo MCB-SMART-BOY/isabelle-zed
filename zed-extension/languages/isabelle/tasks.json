@@ -2,6 +2,9 @@
   {
     "label": "isabelle: check current theory (process_theories)",
     "command": "isabelle",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "never",
     "args": [
       "process_theories",
       "-D",
@@ -13,6 +16,9 @@
   {
     "label": "isabelle: build worktree session (build -D)",
     "command": "isabelle",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "never",
     "args": [
       "build",
       "-D",
