@@ -170,12 +170,16 @@ function Build-Block {
 }
 
 $keymapPath = Resolve-KeymapPath $KeymapPath
+$hadKeymap = Test-Path $keymapPath
+if (-not $hadKeymap -and -not $KeymapPath) {
+  Write-Warning "No keymap found in default locations. Will create: $keymapPath. Set ISABELLE_ZED_KEYMAP_PATH to override."
+}
 $keymapDir = Split-Path $keymapPath -Parent
 if ($keymapDir) {
   New-Item -ItemType Directory -Path $keymapDir -Force | Out-Null
 }
 
-if (Test-Path $keymapPath) {
+if ($hadKeymap) {
   $text = Get-Content -Path $keymapPath -Raw -Encoding UTF8
 } else {
   $text = "[\n]\n"

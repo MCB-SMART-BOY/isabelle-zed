@@ -46,7 +46,11 @@ function Strip-ExistingBlock {
 
 $keymapPath = Resolve-KeymapPath $KeymapPath
 if (-not (Test-Path $keymapPath)) {
-  Write-Host "No keymap found at: $keymapPath"
+  if (-not $KeymapPath) {
+    Write-Warning "No keymap found in default locations. Set ISABELLE_ZED_KEYMAP_PATH to override."
+  } else {
+    Write-Host "No keymap found at: $keymapPath"
+  }
   return
 }
 
