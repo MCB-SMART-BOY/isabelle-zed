@@ -60,6 +60,13 @@ make install-zed-shortcuts
 make uninstall-zed-shortcuts
 ```
 
+补充任务（从任务面板运行）：
+
+- `isabelle: check theory (process_theories -D, prompt)`：输入 Theory 名称（不含 `.thy`）
+- `isabelle: build session (build -D, prompt)`：输入 Session 名称
+
+说明：Zed 任务变量目前无法自动获取当前 Theory 名称，因此默认快捷键仍以 worktree/session 上下文执行。
+
 可视化方式说明：
 
 - 诊断信息：使用 Zed 的标准 Diagnostics（红线、Problems）
@@ -76,8 +83,25 @@ make uninstall-zed-shortcuts
 
 仅在你需要覆盖默认行为时使用。
 
+Native 可选设置：
+
+- `native_logic`：等同于 `-l <logic>`
+- `native_no_build`：等同于 `-n`
+- `native_session_dirs`：追加多个 `-d <dir>`
+- `native_extra_args`：直接追加到 `vscode_server` 的参数列表（字符串数组）
+
+Native 模式行为提示：
+
+- 如果工作区根目录存在 `ROOT` 或 `ROOTS`，会自动附加 `-d <worktree-root>` 以便加载 session。
+
+自动选择 `-l <logic>` 的优先级（从上到下匹配）：
+1. 若工作区根目录 `ROOT` 里仅定义了一个 session，则使用该 session。
+2. 否则，若 `ROOT/ROOTS` 中仅有一个 session 明确继承 `HOL`（例如 `session X = HOL`），则使用该 session。
+3. 否则默认 `HOL`。
+
 Bridge 模式的自动拉起说明：
 
+- Bridge 模式默认 socket：`/tmp/isabelle-<worktree-id>.sock`（可通过 `bridge_socket` 覆盖）。
 - 出于安全考虑，`bridge_autostart_command` / `bridge_autostart_timeout_ms` 不再从工作区 `settings.json` 读取。
 - 如需自动拉起 bridge，请在启动 Zed 前通过环境变量设置：
   - `ISABELLE_BRIDGE_AUTOSTART_CMD`
@@ -224,6 +248,13 @@ make install-zed-shortcuts
 make uninstall-zed-shortcuts
 ```
 
+Extra tasks (run from the task palette):
+
+- `isabelle: check theory (process_theories -D, prompt)`: enter the theory name (without `.thy`)
+- `isabelle: build session (build -D, prompt)`: enter the session name
+
+Note: Zed task variables do not expose the current theory name, so the default shortcut still runs in the worktree/session context.
+
 Visual output model:
 
 - diagnostics: standard Zed diagnostics UI (squiggles/problems)
@@ -240,8 +271,25 @@ These files are at repository root:
 
 Use them only when you need custom overrides.
 
+Optional native settings:
+
+- `native_logic`: maps to `-l <logic>`
+- `native_no_build`: maps to `-n`
+- `native_session_dirs`: appends multiple `-d <dir>`
+- `native_extra_args`: extra argv passed to `vscode_server` (string array)
+
+Native mode behavior note:
+
+- If `ROOT` or `ROOTS` exists at worktree root, the extension auto-adds `-d <worktree-root>` for session discovery.
+
+Auto-selected `-l <logic>` priority (first match wins):
+1. If worktree root `ROOT` defines exactly one session, use it.
+2. Otherwise, if exactly one session across `ROOT/ROOTS` explicitly inherits `HOL` (e.g. `session X = HOL`), use it.
+3. Otherwise default to `HOL`.
+
 Bridge autostart configuration note:
 
+- Bridge mode default socket: `/tmp/isabelle-<worktree-id>.sock` (override via `bridge_socket`).
 - For security hardening, `bridge_autostart_command` / `bridge_autostart_timeout_ms` are no longer read from workspace `settings.json`.
 - To enable bridge autostart, set environment variables before launching Zed:
   - `ISABELLE_BRIDGE_AUTOSTART_CMD`

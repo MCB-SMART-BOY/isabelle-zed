@@ -5,6 +5,9 @@ use bridge::protocol::{
 use serde_json::Value;
 use shell_words::split as split_shell_words;
 use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,8 +17,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, RwLock};
-use tokio::time::Duration;
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tower_lsp::jsonrpc::Result as JsonRpcResult;
 use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticSeverity, ExecuteCommandOptions, Hover, HoverContents,
@@ -30,7 +33,8 @@ use tracing::{debug, error, info, warn};
 const DEFAULT_BRIDGE_SOCKET: &str = "/tmp/isabelle.sock";
 const DEFAULT_SESSION: &str = "s1";
 const DEFAULT_BRIDGE_AUTOSTART_TIMEOUT_MS: u64 = 5_000;
-const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS: u64 = 12_000;
+const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_PUSH_DEBOUNCE_MS: u64 = 200;
 
 const ENV_BRIDGE_AUTOSTART_CMD: &str = "ISABELLE_BRIDGE_AUTOSTART_CMD";
 const ENV_BRIDGE_AUTOSTART_TIMEOUT_MS: &str = "ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS";
@@ -209,12 +213,29 @@ struct DocumentState {
     version: i64,
 }
 
+#[derive(Clone)]
+struct PendingPush {
+    uri: Url,
+    version: i64,
+    text: String,
+    queued_at: Instant,
+}
+
+enum PushEvent {
+    Update { uri: Url, version: i64, text: String },
+    Flush {
+        uris: Option<Vec<Url>>,
+        respond_to: oneshot::Sender<()>,
+    },
+}
+
 struct IsabelleLanguageServer {
     client: Client,
     bridge: BridgeTransport,
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
     published_diagnostic_targets: Arc<RwLock<HashMap<Url, Vec<Url>>>>,
     session_running: Arc<RwLock<bool>>,
+    push_tx: mpsc::UnboundedSender<PushEvent>,
 }
 
 impl IsabelleLanguageServer {
@@ -224,12 +245,27 @@ impl IsabelleLanguageServer {
         session: String,
         request_timeout: Duration,
     ) -> Self {
+        let bridge = BridgeTransport::new(bridge_socket, session, request_timeout);
+        let documents = Arc::new(RwLock::new(HashMap::new()));
+        let published_diagnostic_targets = Arc::new(RwLock::new(HashMap::new()));
+        let session_running = Arc::new(RwLock::new(true));
+        let (push_tx, push_rx) = mpsc::unbounded_channel();
+
+        spawn_push_worker(
+            push_rx,
+            client.clone(),
+            bridge.clone(),
+            published_diagnostic_targets.clone(),
+            session_running.clone(),
+        );
+
         Self {
             client,
-            bridge: BridgeTransport::new(bridge_socket, session, request_timeout),
-            documents: Arc::new(RwLock::new(HashMap::new())),
-            published_diagnostic_targets: Arc::new(RwLock::new(HashMap::new())),
-            session_running: Arc::new(RwLock::new(true)),
+            bridge,
+            documents,
+            published_diagnostic_targets,
+            session_running,
+            push_tx,
         }
     }
 
@@ -256,6 +292,16 @@ impl IsabelleLanguageServer {
         );
     }
 
+    fn schedule_push(&self, uri: Url, version: i64, text: String) {
+        if self
+            .push_tx
+            .send(PushEvent::Update { uri, version, text })
+            .is_err()
+        {
+            error!("push worker channel closed; dropping document.push");
+        }
+    }
+
     async fn apply_change(
         &self,
         uri: &Url,
@@ -277,25 +323,17 @@ impl IsabelleLanguageServer {
         self.documents.read().await.get(uri).cloned()
     }
 
-    async fn push_document(&self, uri: &Url, version: i64, text: String) -> Result<(), String> {
-        if !self.is_session_running().await {
-            return Ok(());
+    async fn flush_pushes(&self, uris: Option<Vec<Url>>) {
+        let (respond_to, response) = oneshot::channel();
+        if self
+            .push_tx
+            .send(PushEvent::Flush { uris, respond_to })
+            .is_err()
+        {
+            return;
         }
 
-        let payload = serde_json::to_value(DocumentPushPayload {
-            uri: uri.to_string(),
-            text,
-        })
-        .map_err(|err| err.to_string())?;
-
-        let response = self
-            .bridge
-            .request(MessageType::DocumentPush, version, payload)
-            .await
-            .map_err(|err| err.to_string())?;
-
-        self.publish_diagnostics(uri.clone(), version, response)
-            .await
+        let _ = response.await;
     }
 
     async fn check_document(&self, uri: &Url, version: i64) -> Result<(), String> {
@@ -315,8 +353,7 @@ impl IsabelleLanguageServer {
             .await
             .map_err(|err| err.to_string())?;
 
-        self.publish_diagnostics(uri.clone(), version, response)
-            .await
+        self.publish_diagnostics(uri.clone(), version, response).await
     }
 
     async fn publish_diagnostics(
@@ -325,69 +362,14 @@ impl IsabelleLanguageServer {
         version: i64,
         response: Message,
     ) -> Result<(), String> {
-        if response.msg_type != MessageType::Diagnostics {
-            return Err(format!(
-                "unexpected response type from bridge: {:?}",
-                response.msg_type
-            ));
-        }
-
-        let payload = response
-            .diagnostics_payload()
-            .map_err(|err| err.to_string())?;
-        let mut grouped: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
-
-        for diagnostic in &payload {
-            let target_uri = match Url::parse(&diagnostic.uri) {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    warn!(
-                        "bridge diagnostic had invalid uri '{}': {err}; publishing to request uri",
-                        diagnostic.uri
-                    );
-                    uri.clone()
-                }
-            };
-
-            grouped
-                .entry(target_uri)
-                .or_default()
-                .push(bridge_diagnostic_to_lsp(diagnostic));
-        }
-
-        grouped.entry(uri.clone()).or_default();
-
-        let current_targets = grouped.keys().cloned().collect::<Vec<_>>();
-        let stale_targets = {
-            let mut state = self.published_diagnostic_targets.write().await;
-            let previous = state.get(&uri).cloned().unwrap_or_default();
-            state.insert(uri.clone(), current_targets.clone());
-            previous
-        };
-
-        let current_target_set = current_targets.into_iter().collect::<HashSet<_>>();
-        let version = Some(i32::try_from(version).unwrap_or(i32::MAX));
-
-        for stale_uri in stale_targets {
-            if !current_target_set.contains(&stale_uri) {
-                self.client
-                    .publish_diagnostics(stale_uri, Vec::new(), version)
-                    .await;
-            }
-        }
-
-        for (target_uri, diagnostics) in grouped {
-            let params = PublishDiagnosticsParams {
-                uri: target_uri,
-                diagnostics,
-                version,
-            };
-            self.client
-                .publish_diagnostics(params.uri, params.diagnostics, params.version)
-                .await;
-        }
-
-        Ok(())
+        publish_diagnostics_for(
+            &self.client,
+            &self.published_diagnostic_targets,
+            uri,
+            version,
+            response,
+        )
+        .await
     }
 
     async fn hover(
@@ -436,21 +418,26 @@ impl IsabelleLanguageServer {
             return Err("isabelle session is stopped".to_string());
         }
 
-        let targets = if let Some(uri) = target_uri {
+        let (targets, flush_uris) = if let Some(uri) = target_uri {
             let parsed = Url::parse(&uri).map_err(|err| err.to_string())?;
-            if let Some(state) = self.document_snapshot(&parsed).await {
-                vec![(parsed, state.version)]
-            } else {
-                vec![(parsed, 1)]
-            }
+            let version = self
+                .document_snapshot(&parsed)
+                .await
+                .map(|snapshot| snapshot.version)
+                .unwrap_or(1);
+            (vec![(parsed.clone(), version)], Some(vec![parsed]))
         } else {
-            self.documents
+            let targets = self
+                .documents
                 .read()
                 .await
                 .iter()
                 .map(|(uri, state)| (uri.clone(), state.version))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (targets, None)
         };
+
+        self.flush_pushes(flush_uris).await;
 
         for (uri, version) in targets {
             self.check_document(&uri, version).await?;
@@ -504,11 +491,211 @@ impl IsabelleLanguageServer {
     }
 
     async fn log_error(&self, message: String) {
-        error!("{message}");
-        self.client
-            .log_message(LspMessageType::ERROR, message)
+        log_error_for(&self.client, message).await;
+    }
+}
+
+fn spawn_push_worker(
+    mut rx: mpsc::UnboundedReceiver<PushEvent>,
+    client: Client,
+    bridge: BridgeTransport,
+    published_diagnostic_targets: Arc<RwLock<HashMap<Url, Vec<Url>>>>,
+    session_running: Arc<RwLock<bool>>,
+) {
+    tokio::spawn(async move {
+        let mut pending_by_uri: HashMap<Url, PendingPush> = HashMap::new();
+        let mut flush_tick = tokio::time::interval(Duration::from_millis(50));
+        flush_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                event = rx.recv() => {
+                    match event {
+                        Some(PushEvent::Update { uri, version, text }) => {
+                            let queued_at = Instant::now();
+                            match pending_by_uri.get_mut(&uri) {
+                                Some(existing) if existing.version > version => {}
+                                Some(existing) => {
+                                    existing.version = version;
+                                    existing.text = text;
+                                    existing.queued_at = queued_at;
+                                }
+                                None => {
+                                    pending_by_uri.insert(uri.clone(), PendingPush { uri, version, text, queued_at });
+                                }
+                            }
+                        }
+                        Some(PushEvent::Flush { uris, respond_to }) => {
+                            let targets = match uris {
+                                Some(list) => list,
+                                None => pending_by_uri.keys().cloned().collect(),
+                            };
+                            for uri in targets {
+                                if let Some(pending) = pending_by_uri.remove(&uri) {
+                                    if let Err(err) = send_document_push(
+                                        &bridge,
+                                        &client,
+                                        &published_diagnostic_targets,
+                                        &session_running,
+                                        &pending.uri,
+                                        pending.version,
+                                        pending.text,
+                                    )
+                                    .await
+                                    {
+                                        log_error_for(&client, format!("failed to push document: {err}")).await;
+                                    }
+                                }
+                            }
+                            let _ = respond_to.send(());
+                        }
+                        None => break,
+                    }
+                }
+                _ = flush_tick.tick() => {
+                    let now = Instant::now();
+                    let ready = pending_by_uri
+                        .iter()
+                        .filter(|(_, pending)| now.duration_since(pending.queued_at) >= Duration::from_millis(DEFAULT_PUSH_DEBOUNCE_MS))
+                        .map(|(uri, _)| uri.clone())
+                        .collect::<Vec<_>>();
+
+                    for uri in ready {
+                        if let Some(pending) = pending_by_uri.remove(&uri) {
+                            if let Err(err) = send_document_push(
+                                &bridge,
+                                &client,
+                                &published_diagnostic_targets,
+                                &session_running,
+                                &pending.uri,
+                                pending.version,
+                                pending.text,
+                            )
+                            .await
+                            {
+                                log_error_for(&client, format!("failed to push document: {err}")).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn send_document_push(
+    bridge: &BridgeTransport,
+    client: &Client,
+    published_diagnostic_targets: &Arc<RwLock<HashMap<Url, Vec<Url>>>>,
+    session_running: &Arc<RwLock<bool>>,
+    uri: &Url,
+    version: i64,
+    text: String,
+) -> Result<(), String> {
+    if !*session_running.read().await {
+        return Ok(());
+    }
+
+    let payload = serde_json::to_value(DocumentPushPayload {
+        uri: uri.to_string(),
+        text,
+    })
+    .map_err(|err| err.to_string())?;
+
+    let response = bridge
+        .request(MessageType::DocumentPush, version, payload)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    publish_diagnostics_for(client, published_diagnostic_targets, uri.clone(), version, response)
+        .await
+}
+
+async fn publish_diagnostics_for(
+    client: &Client,
+    published_diagnostic_targets: &Arc<RwLock<HashMap<Url, Vec<Url>>>>,
+    uri: Url,
+    version: i64,
+    response: Message,
+) -> Result<(), String> {
+    if response.msg_type != MessageType::Diagnostics {
+        return Err(format!(
+            "unexpected response type from bridge: {:?}",
+            response.msg_type
+        ));
+    }
+
+    let payload = response
+        .diagnostics_payload()
+        .map_err(|err| err.to_string())?;
+    let mut grouped: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
+
+    for diagnostic in &payload {
+        let target_uri = match Url::parse(&diagnostic.uri) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                warn!(
+                    "bridge diagnostic had invalid uri '{}': {err}; publishing to request uri",
+                    diagnostic.uri
+                );
+                uri.clone()
+            }
+        };
+
+        grouped
+            .entry(target_uri)
+            .or_default()
+            .push(bridge_diagnostic_to_lsp(diagnostic));
+    }
+
+    grouped.entry(uri.clone()).or_default();
+
+    let current_targets = grouped.keys().cloned().collect::<Vec<_>>();
+    let stale_targets = {
+        let mut state = published_diagnostic_targets.write().await;
+        let previous = state.get(&uri).cloned().unwrap_or_default();
+        state.insert(uri.clone(), current_targets.clone());
+        previous
+    };
+
+    let current_target_set = current_targets.into_iter().collect::<HashSet<_>>();
+    let request_version = Some(i32::try_from(version).unwrap_or(i32::MAX));
+
+    for stale_uri in stale_targets {
+        if !current_target_set.contains(&stale_uri) {
+            let publish_version = if stale_uri == uri {
+                request_version
+            } else {
+                None
+            };
+            client
+                .publish_diagnostics(stale_uri, Vec::new(), publish_version)
+                .await;
+        }
+    }
+
+    for (target_uri, diagnostics) in grouped {
+        let publish_version = if target_uri == uri {
+            request_version
+        } else {
+            None
+        };
+        let params = PublishDiagnosticsParams {
+            uri: target_uri,
+            diagnostics,
+            version: publish_version,
+        };
+        client
+            .publish_diagnostics(params.uri, params.diagnostics, params.version)
             .await;
     }
+
+    Ok(())
+}
+
+async fn log_error_for(client: &Client, message: String) {
+    error!("{message}");
+    client.log_message(LspMessageType::ERROR, message).await;
 }
 
 #[tower_lsp::async_trait]
@@ -548,11 +735,7 @@ impl LanguageServer for IsabelleLanguageServer {
         let text = text_document.text.clone();
 
         self.upsert_document(text_document).await;
-
-        if let Err(err) = self.push_document(&uri, version, text).await {
-            self.log_error(format!("failed to push document on open: {err}"))
-                .await;
-        }
+        self.schedule_push(uri, version, text);
     }
 
     async fn did_change(&self, params: tower_lsp::lsp_types::DidChangeTextDocumentParams) {
@@ -562,10 +745,8 @@ impl LanguageServer for IsabelleLanguageServer {
         if let Some(text) = self
             .apply_change(&uri, version, params.content_changes)
             .await
-            && let Err(err) = self.push_document(&uri, version, text).await
         {
-            self.log_error(format!("failed to push document on change: {err}"))
-                .await;
+            self.schedule_push(uri, version, text);
         }
     }
 
@@ -589,11 +770,8 @@ impl LanguageServer for IsabelleLanguageServer {
             self.document_snapshot(&uri).await
         };
 
-        if let Some(state) = state
-            && let Err(err) = self.push_document(&uri, state.version, state.text).await
-        {
-            self.log_error(format!("failed to push document on save: {err}"))
-                .await;
+        if let Some(state) = state {
+            self.schedule_push(uri, state.version, state.text);
         }
     }
 
@@ -729,7 +907,14 @@ fn parse_autostart_command(command: &str) -> Result<(String, Vec<String>), Strin
 
 async fn autostart_bridge_if_needed(socket_path: &Path) -> Option<Child> {
     if socket_path.exists() {
-        return None;
+        if socket_is_healthy(socket_path).await {
+            return None;
+        }
+
+        if let Err(err) = remove_stale_socket(socket_path) {
+            error!("failed to remove stale bridge socket {}: {err}", socket_path.display());
+            return None;
+        }
     }
 
     let command = std::env::var(ENV_BRIDGE_AUTOSTART_CMD).ok()?;
@@ -776,6 +961,45 @@ async fn autostart_bridge_if_needed(socket_path: &Path) -> Option<Child> {
     Some(child)
 }
 
+async fn socket_is_healthy(socket_path: &Path) -> bool {
+    match tokio::time::timeout(Duration::from_millis(200), UnixStream::connect(socket_path)).await {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            true
+        }
+        Ok(Err(err)) => {
+            debug!("bridge socket {} is not connectable: {err}", socket_path.display());
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn remove_stale_socket(socket_path: &Path) -> Result<(), std::io::Error> {
+    let metadata = std::fs::symlink_metadata(socket_path)?;
+    #[cfg(unix)]
+    {
+        if metadata.file_type().is_socket() {
+            return std::fs::remove_file(socket_path);
+        }
+        return Err(std::io::Error::new(
+            ErrorKind::AlreadyExists,
+            format!(
+                "refusing to remove non-socket path before autostart: {}",
+                socket_path.display()
+            ),
+        ));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(std::io::Error::new(
+            ErrorKind::Unsupported,
+            "non-unix platforms do not support unix socket cleanup",
+        ))
+    }
+}
+
 async fn wait_for_socket(socket_path: &Path, timeout: Duration) -> bool {
     let start = tokio::time::Instant::now();
     while start.elapsed() <= timeout {
@@ -806,7 +1030,7 @@ async fn main() {
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis)
         .unwrap_or_else(|| Duration::from_millis(DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS));
-    let _bridge_child = autostart_bridge_if_needed(&bridge_socket).await;
+    let mut bridge_child = autostart_bridge_if_needed(&bridge_socket).await;
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -821,6 +1045,11 @@ async fn main() {
     });
 
     Server::new(stdin, stdout, socket).serve(service).await;
+
+    if let Some(mut child) = bridge_child.take() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
 }
 
 #[cfg(test)]

@@ -45,12 +45,13 @@ object AdapterMain {
       val lines = output.linesIterator.toList
 
       val parsed = lines.collect {
-        case ErrorLineRegex(lineRaw, _, message) =>
+        case ErrorLineRegex(lineRaw, filePath, message) =>
           val line = Try(lineRaw.toInt).toOption.getOrElse(1)
           val safeLine = if (line < 1) 1 else line
+          val diagnosticUri = pathToUri(filePath).getOrElse(uri)
 
           Diagnostic(
-            uri = uri,
+            uri = diagnosticUri,
             range = Range(
               start = Position(safeLine, 1),
               end = Position(safeLine, 2)
@@ -207,6 +208,9 @@ object AdapterMain {
       regex.findFirstMatchIn(text).map(_.group(1))
     }
 
+    private def pathToUri(path: String): Option[String] =
+      Try(Paths.get(path).toUri.toString).toOption
+
     private def theoryNameFromUri(uri: String): Option[String] =
       Try {
         val parsed = URI.create(uri)
@@ -318,7 +322,12 @@ object AdapterMain {
         config.copy(mock = true)
       } else if (arg.startsWith("--socket=")) {
         val socket = parseSocketArg(arg.stripPrefix("--socket="))
-        config.copy(socket = socket)
+        socket match {
+          case Some(value) => config.copy(socket = Some(value))
+          case None =>
+            System.exit(2)
+            config
+        }
       } else if (arg.startsWith("--isabelle-path=")) {
         config.copy(isabellePath = arg.stripPrefix("--isabelle-path="))
       } else if (arg.startsWith("--logic=")) {

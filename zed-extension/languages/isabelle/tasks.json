@@ -14,6 +14,21 @@
     "tags": ["isabelle-check"]
   },
   {
+    "label": "isabelle: check theory (process_theories -D, prompt)",
+    "command": "isabelle",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "never",
+    "args": [
+      "process_theories",
+      "-D",
+      "$ZED_WORKTREE_ROOT",
+      "$ZED_CUSTOM_theory"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "tags": ["isabelle-check"]
+  },
+  {
     "label": "isabelle: build worktree session (build -D)",
     "command": "isabelle",
     "use_new_terminal": false,
@@ -23,6 +38,20 @@
       "build",
       "-D",
       "$ZED_WORKTREE_ROOT"
+    ],
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "isabelle: build session (build -D, prompt)",
+    "command": "isabelle",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "never",
+    "args": [
+      "build",
+      "-D",
+      "$ZED_WORKTREE_ROOT",
+      "$ZED_CUSTOM_session"
     ],
     "cwd": "$ZED_WORKTREE_ROOT"
   }

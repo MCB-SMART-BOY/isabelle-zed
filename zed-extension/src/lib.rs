@@ -6,9 +6,6 @@ const ISABELLE_LANGUAGE_SERVER_ID: &str = "isabelle-lsp";
 const DEFAULT_NATIVE_BINARY: &str = "isabelle";
 const DEFAULT_BRIDGE_BINARY: &str = "isabelle-zed-lsp";
 
-const DEFAULT_BRIDGE_SOCKET: &str = "/tmp/isabelle.sock";
-const DEFAULT_SESSION: &str = "s1";
-
 const ENV_BRIDGE_SOCKET: &str = "ISABELLE_BRIDGE_SOCKET";
 const ENV_SESSION: &str = "ISABELLE_SESSION";
 const ENV_BRIDGE_AUTOSTART_CMD: &str = "ISABELLE_BRIDGE_AUTOSTART_CMD";
@@ -22,6 +19,7 @@ const SETTINGS_KEY_BRIDGE_AUTOSTART_TIMEOUT_MS: &str = "bridge_autostart_timeout
 const SETTINGS_KEY_NATIVE_LOGIC: &str = "native_logic";
 const SETTINGS_KEY_NATIVE_NO_BUILD: &str = "native_no_build";
 const SETTINGS_KEY_NATIVE_SESSION_DIRS: &str = "native_session_dirs";
+const SETTINGS_KEY_NATIVE_EXTRA_ARGS: &str = "native_extra_args";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServerMode {
@@ -44,7 +42,7 @@ impl IsabelleExtension {
 
         let mode = mode_from_settings(&settings_json);
         let command = resolve_command_path(worktree, mode, binary.as_ref());
-        let args = resolve_command_args(mode, binary.as_ref(), &settings_json);
+        let args = resolve_command_args(mode, binary.as_ref(), &settings_json, worktree);
         let env = resolve_environment(worktree, mode, binary.as_ref(), &settings_json);
 
         zed::Command { command, args, env }
@@ -120,21 +118,24 @@ fn resolve_command_args(
     mode: ServerMode,
     binary: Option<&zed::settings::CommandSettings>,
     settings_json: &Option<Value>,
+    worktree: &zed::Worktree,
 ) -> Vec<String> {
     if let Some(args) = binary.and_then(|binary| binary.arguments.clone()) {
         return args;
     }
 
     match mode {
-        ServerMode::Native => native_default_args(settings_json),
+        ServerMode::Native => native_default_args(settings_json, worktree),
         ServerMode::Bridge => Vec::new(),
     }
 }
 
-fn native_default_args(settings_json: &Option<Value>) -> Vec<String> {
+fn native_default_args(settings_json: &Option<Value>, worktree: &zed::Worktree) -> Vec<String> {
     let mut args = vec!["vscode_server".to_string()];
 
-    if let Some(logic) = setting_string(settings_json, SETTINGS_KEY_NATIVE_LOGIC) {
+    let logic = setting_string(settings_json, SETTINGS_KEY_NATIVE_LOGIC)
+        .or_else(|| auto_logic_from_root(worktree));
+    if let Some(logic) = logic {
         args.push("-l".to_string());
         args.push(logic);
     }
@@ -143,12 +144,230 @@ fn native_default_args(settings_json: &Option<Value>) -> Vec<String> {
         args.push("-n".to_string());
     }
 
-    for session_dir in setting_string_array(settings_json, SETTINGS_KEY_NATIVE_SESSION_DIRS) {
+    let mut session_dirs = setting_string_array(settings_json, SETTINGS_KEY_NATIVE_SESSION_DIRS);
+    if worktree_has_session_root(worktree) {
+        let root = worktree.root_path();
+        if !session_dirs.iter().any(|dir| dir == &root) {
+            session_dirs.push(root);
+        }
+    }
+
+    for session_dir in session_dirs {
         args.push("-d".to_string());
         args.push(session_dir);
     }
 
+    for extra in setting_string_array(settings_json, SETTINGS_KEY_NATIVE_EXTRA_ARGS) {
+        args.push(extra);
+    }
+
     args
+}
+
+fn worktree_has_session_root(worktree: &zed::Worktree) -> bool {
+    worktree.read_text_file("ROOT").is_ok() || worktree.read_text_file("ROOTS").is_ok()
+}
+
+#[derive(Clone, Debug)]
+struct SessionInfo {
+    name: String,
+    parent: Option<String>,
+    origin: SessionOrigin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionOrigin {
+    WorktreeRoot,
+    OtherRoot,
+}
+
+fn auto_logic_from_root(worktree: &zed::Worktree) -> Option<String> {
+    let mut sessions = Vec::new();
+    collect_sessions_from_root(worktree, "ROOT", SessionOrigin::WorktreeRoot, &mut sessions);
+
+    if let Ok(roots) = worktree.read_text_file("ROOTS") {
+        for line in roots.lines() {
+            let Some(root_entry) = parse_roots_line(line) else {
+                continue;
+            };
+            let root_path = format!("{}/ROOT", root_entry.trim_end_matches('/'));
+            collect_sessions_from_root(
+                worktree,
+                &root_path,
+                SessionOrigin::OtherRoot,
+                &mut sessions,
+            );
+        }
+    }
+
+    pick_auto_logic(&sessions)
+}
+
+fn pick_auto_logic(sessions: &[SessionInfo]) -> Option<String> {
+    let root_names = unique_session_names(
+        sessions
+            .iter()
+            .filter(|session| session.origin == SessionOrigin::WorktreeRoot),
+    );
+    if root_names.len() == 1 {
+        return root_names.into_iter().next();
+    }
+
+    let hol_names = unique_session_names(
+        sessions
+            .iter()
+            .filter(|session| session.parent.as_deref() == Some("HOL")),
+    );
+    if hol_names.len() == 1 {
+        return hol_names.into_iter().next();
+    }
+
+    None
+}
+
+fn unique_session_names<'a, I>(sessions: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a SessionInfo>,
+{
+    let mut unique = Vec::new();
+    for session in sessions {
+        if !unique.contains(&session.name) {
+            unique.push(session.name.clone());
+        }
+    }
+    unique
+}
+
+fn collect_sessions_from_root(
+    worktree: &zed::Worktree,
+    path: &str,
+    origin: SessionOrigin,
+    out: &mut Vec<SessionInfo>,
+) {
+    let Ok(text) = worktree.read_text_file(path) else {
+        return;
+    };
+
+    for line in text.lines() {
+        if let Some((name, parent)) = parse_session_from_line(line) {
+            out.push(SessionInfo {
+                name,
+                parent,
+                origin,
+            });
+        }
+    }
+}
+
+fn parse_session_from_line(line: &str) -> Option<(String, Option<String>)> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("(*") {
+        return None;
+    }
+
+    let trimmed = strip_unquoted_hash_comment(trimmed);
+    let trimmed = trimmed.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let tokens = tokenize_root_line(trimmed);
+    let first = tokens.first()?;
+    if first != "session" {
+        return None;
+    }
+
+    let name = tokens.get(1)?.clone();
+    if name.is_empty() {
+        return None;
+    }
+
+    let mut parent = None;
+    for window in tokens.windows(2) {
+        if window[0] == "=" {
+            let candidate = window[1].clone();
+            if !candidate.is_empty() {
+                parent = Some(candidate);
+            }
+            break;
+        }
+    }
+
+    Some((name, parent))
+}
+
+fn parse_roots_line(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return None;
+    }
+
+    let trimmed = strip_unquoted_hash_comment(trimmed);
+    let trimmed = trimmed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(quoted) = trimmed.strip_prefix('"') {
+        let name = quoted.split('"').next().unwrap_or("").trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn strip_unquoted_hash_comment(line: &str) -> String {
+    let mut out = String::new();
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        if ch == '"' {
+            in_quotes = !in_quotes;
+            out.push(ch);
+            continue;
+        }
+        if ch == '#' && !in_quotes {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn tokenize_root_line(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '"' {
+            let mut token = String::new();
+            while let Some(next) = chars.next() {
+                if next == '"' {
+                    break;
+                }
+                token.push(next);
+            }
+            tokens.push(token);
+            continue;
+        }
+
+        let mut token = String::new();
+        token.push(ch);
+        while let Some(next) = chars.peek() {
+            if next.is_whitespace() {
+                break;
+            }
+            token.push(*next);
+            chars.next();
+        }
+        tokens.push(token);
+    }
+    tokens
 }
 
 fn resolve_environment(
@@ -166,9 +385,9 @@ fn resolve_environment(
         ServerMode::Native => env,
         ServerMode::Bridge => {
             let bridge_socket = setting_string(settings_json, SETTINGS_KEY_BRIDGE_SOCKET)
-                .unwrap_or_else(|| DEFAULT_BRIDGE_SOCKET.to_string());
+                .unwrap_or_else(|| default_bridge_socket(worktree));
             let session = setting_string(settings_json, SETTINGS_KEY_SESSION)
-                .unwrap_or_else(|| DEFAULT_SESSION.to_string());
+                .unwrap_or_else(|| default_session(worktree));
 
             ensure_env_var(&mut env, ENV_BRIDGE_SOCKET, bridge_socket);
             ensure_env_var(&mut env, ENV_SESSION, session);
@@ -176,6 +395,14 @@ fn resolve_environment(
             env
         }
     }
+}
+
+fn default_bridge_socket(worktree: &zed::Worktree) -> String {
+    format!("/tmp/isabelle-{}.sock", worktree.id())
+}
+
+fn default_session(worktree: &zed::Worktree) -> String {
+    format!("s{}", worktree.id())
 }
 
 fn merge_environment(
@@ -257,6 +484,7 @@ fn strip_control_settings(settings: Value) -> Option<Value> {
         SETTINGS_KEY_NATIVE_LOGIC,
         SETTINGS_KEY_NATIVE_NO_BUILD,
         SETTINGS_KEY_NATIVE_SESSION_DIRS,
+        SETTINGS_KEY_NATIVE_EXTRA_ARGS,
     ] {
         object.remove(key);
     }
@@ -299,6 +527,7 @@ mod tests {
             "native_logic": "HOL",
             "native_no_build": false,
             "native_session_dirs": ["."],
+            "native_extra_args": ["-v"],
             "isabelle": {
                 "completion_limit": 200
             }
@@ -348,5 +577,95 @@ mod tests {
                 .any(|(k, _)| k == ENV_BRIDGE_AUTOSTART_TIMEOUT_MS)
         );
         assert!(merged.iter().any(|(k, v)| k == ENV_SESSION && v == "s2"));
+    }
+
+    #[test]
+    fn parse_session_line_extracts_name_and_parent() {
+        assert_eq!(
+            parse_session_from_line("session Foo = HOL"),
+            Some(("Foo".to_string(), Some("HOL".to_string())))
+        );
+        assert_eq!(
+            parse_session_from_line("session \"Foo Bar\" in \"dir with space\" = \"HOL\" # comment"),
+            Some(("Foo Bar".to_string(), Some("HOL".to_string())))
+        );
+        assert_eq!(
+            parse_session_from_line("session Foo"),
+            Some(("Foo".to_string(), None))
+        );
+        assert_eq!(parse_session_from_line("# session Foo = HOL"), None);
+        assert_eq!(parse_session_from_line("(* session Foo = HOL *)"), None);
+    }
+
+    #[test]
+    fn parse_roots_line_handles_quotes_and_comments() {
+        assert_eq!(
+            parse_roots_line("src/logic  # comment"),
+            Some("src/logic".to_string())
+        );
+        assert_eq!(
+            parse_roots_line("\"src with space\""),
+            Some("src with space".to_string())
+        );
+        assert_eq!(parse_roots_line("# only comment"), None);
+    }
+
+    #[test]
+    fn pick_auto_logic_prefers_single_root_session() {
+        let sessions = vec![
+            SessionInfo {
+                name: "RootOnly".to_string(),
+                parent: Some("HOL".to_string()),
+                origin: SessionOrigin::WorktreeRoot,
+            },
+            SessionInfo {
+                name: "Other".to_string(),
+                parent: Some("HOL".to_string()),
+                origin: SessionOrigin::OtherRoot,
+            },
+        ];
+
+        assert_eq!(pick_auto_logic(&sessions), Some("RootOnly".to_string()));
+    }
+
+    #[test]
+    fn pick_auto_logic_falls_back_to_single_hol_parent() {
+        let sessions = vec![
+            SessionInfo {
+                name: "RootA".to_string(),
+                parent: Some("Pure".to_string()),
+                origin: SessionOrigin::WorktreeRoot,
+            },
+            SessionInfo {
+                name: "RootB".to_string(),
+                parent: Some("Pure".to_string()),
+                origin: SessionOrigin::WorktreeRoot,
+            },
+            SessionInfo {
+                name: "HolChild".to_string(),
+                parent: Some("HOL".to_string()),
+                origin: SessionOrigin::OtherRoot,
+            },
+        ];
+
+        assert_eq!(pick_auto_logic(&sessions), Some("HolChild".to_string()));
+    }
+
+    #[test]
+    fn pick_auto_logic_returns_none_for_multiple_candidates() {
+        let sessions = vec![
+            SessionInfo {
+                name: "HolA".to_string(),
+                parent: Some("HOL".to_string()),
+                origin: SessionOrigin::OtherRoot,
+            },
+            SessionInfo {
+                name: "HolB".to_string(),
+                parent: Some("HOL".to_string()),
+                origin: SessionOrigin::OtherRoot,
+            },
+        ];
+
+        assert_eq!(pick_auto_logic(&sessions), None);
     }
 }

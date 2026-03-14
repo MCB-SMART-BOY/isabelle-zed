@@ -213,6 +213,18 @@ where
                             Ok(message) => {
                                 if message.msg_type == MessageType::DocumentPush {
                                     debounce.enqueue(message)?;
+                                } else if message.msg_type == MessageType::DocumentCheck {
+                                    match message.check_payload() {
+                                        Ok(payload) => {
+                                            if let Some(pending) = debounce.drain_for_uri(&payload.uri) {
+                                                process.send(&pending).await?;
+                                            }
+                                        }
+                                        Err(err) => {
+                                            warn!("document.check payload parse failed: {err}");
+                                        }
+                                    }
+                                    process.send(&message).await?;
                                 } else {
                                     process.send(&message).await?;
                                 }

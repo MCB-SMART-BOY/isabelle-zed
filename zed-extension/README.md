@@ -44,6 +44,13 @@ make install-zed-shortcuts
 make uninstall-zed-shortcuts
 ```
 
+补充任务（从任务面板运行）：
+
+- `isabelle: check theory (process_theories -D, prompt)`：输入 Theory 名称（不含 `.thy`）
+- `isabelle: build session (build -D, prompt)`：输入 Session 名称
+
+说明：Zed 任务变量目前无法自动获取当前 Theory 名称，因此默认快捷键仍以 worktree/session 上下文执行。
+
 可视输出：
 
 - diagnostics 走 Zed 标准问题视图
@@ -72,6 +79,26 @@ make release-build
 - `examples/zed-settings-native.json`
 - `examples/zed-settings-bridge-mock.json`
 - `examples/zed-keymap-isabelle.json`
+
+Native 可选设置：
+
+- `native_logic`：等同于 `-l <logic>`
+- `native_no_build`：等同于 `-n`
+- `native_session_dirs`：追加多个 `-d <dir>`
+- `native_extra_args`：直接追加到 `vscode_server` 的参数列表（字符串数组）
+
+Native 模式行为提示：
+
+- 如果工作区根目录存在 `ROOT` 或 `ROOTS`，会自动附加 `-d <worktree-root>` 以便加载 session。
+
+自动选择 `-l <logic>` 的优先级（从上到下匹配）：
+1. 若工作区根目录 `ROOT` 里仅定义了一个 session，则使用该 session。
+2. 否则，若 `ROOT/ROOTS` 中仅有一个 session 明确继承 `HOL`（例如 `session X = HOL`），则使用该 session。
+3. 否则默认 `HOL`。
+
+Bridge 模式默认 socket：
+
+- `/tmp/isabelle-<worktree-id>.sock`（可通过 `bridge_socket` 覆盖）
 
 Bridge 自动拉起配置说明：
 
@@ -152,6 +179,13 @@ make install-zed-shortcuts
 make uninstall-zed-shortcuts
 ```
 
+Extra tasks (run from the task palette):
+
+- `isabelle: check theory (process_theories -D, prompt)`: enter the theory name (without `.thy`)
+- `isabelle: build session (build -D, prompt)`: enter the session name
+
+Note: Zed task variables do not expose the current theory name, so the default shortcut still runs in the worktree/session context.
+
 Visual output:
 
 - diagnostics through standard Zed diagnostics UI
@@ -180,6 +214,26 @@ Example files are at repository root:
 - `examples/zed-settings-native.json`
 - `examples/zed-settings-bridge-mock.json`
 - `examples/zed-keymap-isabelle.json`
+
+Optional native settings:
+
+- `native_logic`: maps to `-l <logic>`
+- `native_no_build`: maps to `-n`
+- `native_session_dirs`: appends multiple `-d <dir>`
+- `native_extra_args`: extra argv passed to `vscode_server` (string array)
+
+Native mode behavior note:
+
+- If `ROOT` or `ROOTS` exists at worktree root, the extension auto-adds `-d <worktree-root>` for session discovery.
+
+Auto-selected `-l <logic>` priority (first match wins):
+1. If worktree root `ROOT` defines exactly one session, use it.
+2. Otherwise, if exactly one session across `ROOT/ROOTS` explicitly inherits `HOL` (e.g. `session X = HOL`), use it.
+3. Otherwise default to `HOL`.
+
+Bridge mode default socket:
+
+- `/tmp/isabelle-<worktree-id>.sock` (override via `bridge_socket`)
 
 Bridge autostart configuration note:
 

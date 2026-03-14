@@ -35,7 +35,7 @@ ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
 - `ISABELLE_SESSION`（默认 `s1`）
 - `ISABELLE_BRIDGE_AUTOSTART_CMD`（可选）：bridge socket 不存在时用于自动拉起 bridge 的命令行（按 argv 解析，不经 `bash -lc`）
 - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS`（默认 `5000`）
-- `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS`（默认 `12000`）：单次 bridge 请求超时时间，超时会重连重试一次
+- `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS`（默认 `30000`）：单次 bridge 请求超时时间，超时会重连重试一次
 
 ### 诊断位置与跨文件诊断
 
@@ -77,7 +77,7 @@ Optional environment variables:
 - `ISABELLE_SESSION` (default: `s1`)
 - `ISABELLE_BRIDGE_AUTOSTART_CMD` (optional): command line used to auto-start bridge when socket is missing (parsed into argv, without `bash -lc`)
 - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS` (default: `5000`)
-- `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS` (default: `12000`): per-request timeout for bridge calls, with one reconnect retry
+- `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS` (default: `30000`): per-request timeout for bridge calls, with one reconnect retry
 
 ### Diagnostic positions and cross-file diagnostics
 
