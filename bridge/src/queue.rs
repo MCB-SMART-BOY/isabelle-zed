@@ -75,7 +75,9 @@ impl DebounceQueue {
     }
 
     pub fn drain_for_uri(&mut self, uri: &str) -> Option<Message> {
-        self.pending_by_uri.remove(uri).map(|pending| pending.message)
+        self.pending_by_uri
+            .remove(uri)
+            .map(|pending| pending.message)
     }
 
     pub fn is_empty(&self) -> bool {

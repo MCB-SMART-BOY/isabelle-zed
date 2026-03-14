@@ -81,6 +81,9 @@ object AdapterMain {
     }
   }
 
+  private def pathToUri(path: String): Option[String] =
+    Try(Paths.get(path).toUri.toString).toOption
+
   final case class Config(
     mock: Boolean,
     socket: Option[(String, Int)],
@@ -207,9 +210,6 @@ object AdapterMain {
       val regex = raw"(?m)^\s*theory\s+([A-Za-z0-9_'.-]+)\b".r
       regex.findFirstMatchIn(text).map(_.group(1))
     }
-
-    private def pathToUri(path: String): Option[String] =
-      Try(Paths.get(path).toUri.toString).toOption
 
     private def theoryNameFromUri(uri: String): Option[String] =
       Try {

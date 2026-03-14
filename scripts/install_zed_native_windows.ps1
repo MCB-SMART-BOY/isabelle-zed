@@ -78,8 +78,14 @@ if (Get-Command isabelle -ErrorAction SilentlyContinue) {
   Write-Warning "'isabelle' not found in PATH. native mode will not start until PATH is fixed."
 }
 
-if (-not $SkipShortcuts) {
-  Write-Warning "Shortcut install is not implemented for Windows. Use Zed command palette to open keymap and copy examples/zed-keymap-isabelle.json manually."
+$skipShortcutsEnv = $env:ISABELLE_ZED_SKIP_SHORTCUTS -eq "1"
+if (-not $SkipShortcuts -and -not $skipShortcutsEnv) {
+  $shortcutScript = Join-Path $RepoRoot "scripts/install_zed_shortcuts_windows.ps1"
+  if (Test-Path $shortcutScript) {
+    & $shortcutScript
+  } else {
+    Write-Warning "Shortcut installer not found: $shortcutScript"
+  }
 }
 
 Write-Host "Restart Zed (or reload extensions) and open a .thy file."

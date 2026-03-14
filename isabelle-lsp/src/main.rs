@@ -222,7 +222,11 @@ struct PendingPush {
 }
 
 enum PushEvent {
-    Update { uri: Url, version: i64, text: String },
+    Update {
+        uri: Url,
+        version: i64,
+        text: String,
+    },
     Flush {
         uris: Option<Vec<Url>>,
         respond_to: oneshot::Sender<()>,
@@ -353,7 +357,8 @@ impl IsabelleLanguageServer {
             .await
             .map_err(|err| err.to_string())?;
 
-        self.publish_diagnostics(uri.clone(), version, response).await
+        self.publish_diagnostics(uri.clone(), version, response)
+            .await
     }
 
     async fn publish_diagnostics(
@@ -607,8 +612,14 @@ async fn send_document_push(
         .await
         .map_err(|err| err.to_string())?;
 
-    publish_diagnostics_for(client, published_diagnostic_targets, uri.clone(), version, response)
-        .await
+    publish_diagnostics_for(
+        client,
+        published_diagnostic_targets,
+        uri.clone(),
+        version,
+        response,
+    )
+    .await
 }
 
 async fn publish_diagnostics_for(
@@ -912,7 +923,10 @@ async fn autostart_bridge_if_needed(socket_path: &Path) -> Option<Child> {
         }
 
         if let Err(err) = remove_stale_socket(socket_path) {
-            error!("failed to remove stale bridge socket {}: {err}", socket_path.display());
+            error!(
+                "failed to remove stale bridge socket {}: {err}",
+                socket_path.display()
+            );
             return None;
         }
     }
@@ -968,7 +982,10 @@ async fn socket_is_healthy(socket_path: &Path) -> bool {
             true
         }
         Ok(Err(err)) => {
-            debug!("bridge socket {} is not connectable: {err}", socket_path.display());
+            debug!(
+                "bridge socket {} is not connectable: {err}",
+                socket_path.display()
+            );
             false
         }
         Err(_) => false,

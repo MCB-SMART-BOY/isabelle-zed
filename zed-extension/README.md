@@ -40,7 +40,15 @@ Windows 原生安装（PowerShell）：
 
 说明：
 
-- Windows 下不会自动安装快捷键；请在 Zed 内使用命令面板打开 keymap 并手动合并 `examples/zed-keymap-isabelle.json`。
+- Windows 脚本默认会安装快捷键；如需跳过，设置 `ISABELLE_ZED_SKIP_SHORTCUTS=1` 或传 `-SkipShortcuts`。
+- 单独安装/卸载快捷键：
+
+```powershell
+./scripts/install_zed_shortcuts_windows.ps1
+./scripts/uninstall_zed_shortcuts_windows.ps1
+```
+
+- 若 keymap 不在默认位置，设置 `ISABELLE_ZED_KEYMAP_PATH` 指向实际文件。
 - 若 `isabelle` 不在 `PATH`，请在 Zed 设置中指定可执行文件路径（可指向 `isabelle` 或自建 wrapper）。
 
 ### 快捷键与可视输出
@@ -192,7 +200,15 @@ Uninstall:
 
 Notes:
 
-- Shortcuts are not installed automatically on Windows; use Zed command palette to open keymap and merge `examples/zed-keymap-isabelle.json`.
+- Windows script installs shortcuts by default; to skip, set `ISABELLE_ZED_SKIP_SHORTCUTS=1` or pass `-SkipShortcuts`.
+- Install/uninstall shortcuts only:
+
+```powershell
+./scripts/install_zed_shortcuts_windows.ps1
+./scripts/uninstall_zed_shortcuts_windows.ps1
+```
+
+- If your keymap lives elsewhere, set `ISABELLE_ZED_KEYMAP_PATH` to the actual file.
 - If `isabelle` is not on `PATH`, set the executable path in Zed settings (point to your `isabelle` or a wrapper).
 
 ### Shortcuts and visual output
