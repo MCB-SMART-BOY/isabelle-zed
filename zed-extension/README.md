@@ -26,6 +26,23 @@ make build-isabelle-grammar
 make uninstall-zed-native
 ```
 
+Windows 原生安装（PowerShell）：
+
+```powershell
+./scripts/install_zed_native_windows.ps1
+```
+
+卸载：
+
+```powershell
+./scripts/uninstall_zed_native_windows.ps1
+```
+
+说明：
+
+- Windows 下不会自动安装快捷键；请在 Zed 内使用命令面板打开 keymap 并手动合并 `examples/zed-keymap-isabelle.json`。
+- 若 `isabelle` 不在 `PATH`，请在 Zed 设置中指定可执行文件路径（可指向 `isabelle` 或自建 wrapper）。
+
 ### 快捷键与可视输出
 
 默认快捷键：
@@ -160,6 +177,23 @@ Uninstall:
 ```bash
 make uninstall-zed-native
 ```
+
+Windows native install (PowerShell):
+
+```powershell
+./scripts/install_zed_native_windows.ps1
+```
+
+Uninstall:
+
+```powershell
+./scripts/uninstall_zed_native_windows.ps1
+```
+
+Notes:
+
+- Shortcuts are not installed automatically on Windows; use Zed command palette to open keymap and merge `examples/zed-keymap-isabelle.json`.
+- If `isabelle` is not on `PATH`, set the executable path in Zed settings (point to your `isabelle` or a wrapper).
 
 ### Shortcuts and visual output
 
