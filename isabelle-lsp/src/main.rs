@@ -536,8 +536,8 @@ fn spawn_push_worker(
                                 None => pending_by_uri.keys().cloned().collect(),
                             };
                             for uri in targets {
-                                if let Some(pending) = pending_by_uri.remove(&uri) {
-                                    if let Err(err) = send_document_push(
+                                if let Some(pending) = pending_by_uri.remove(&uri)
+                                    && let Err(err) = send_document_push(
                                         &bridge,
                                         &client,
                                         &published_diagnostic_targets,
@@ -547,9 +547,8 @@ fn spawn_push_worker(
                                         pending.text,
                                     )
                                     .await
-                                    {
-                                        log_error_for(&client, format!("failed to push document: {err}")).await;
-                                    }
+                                {
+                                    log_error_for(&client, format!("failed to push document: {err}")).await;
                                 }
                             }
                             let _ = respond_to.send(());
@@ -566,8 +565,8 @@ fn spawn_push_worker(
                         .collect::<Vec<_>>();
 
                     for uri in ready {
-                        if let Some(pending) = pending_by_uri.remove(&uri) {
-                            if let Err(err) = send_document_push(
+                        if let Some(pending) = pending_by_uri.remove(&uri)
+                            && let Err(err) = send_document_push(
                                 &bridge,
                                 &client,
                                 &published_diagnostic_targets,
@@ -577,9 +576,8 @@ fn spawn_push_worker(
                                 pending.text,
                             )
                             .await
-                            {
-                                log_error_for(&client, format!("failed to push document: {err}")).await;
-                            }
+                        {
+                            log_error_for(&client, format!("failed to push document: {err}")).await;
                         }
                     }
                 }
@@ -999,13 +997,13 @@ fn remove_stale_socket(socket_path: &Path) -> Result<(), std::io::Error> {
         if metadata.file_type().is_socket() {
             return std::fs::remove_file(socket_path);
         }
-        return Err(std::io::Error::new(
+        Err(std::io::Error::new(
             ErrorKind::AlreadyExists,
             format!(
                 "refusing to remove non-socket path before autostart: {}",
                 socket_path.display()
             ),
-        ));
+        ))
     }
     #[cfg(not(unix))]
     {
