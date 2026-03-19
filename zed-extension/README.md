@@ -36,7 +36,7 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 说明：
 
 - 上述是 native 模式（直接调用 `isabelle vscode_server`），支持 Windows/Linux/macOS。
-- 若切换到 bridge 模式，bridge / isabelle-zed-lsp 目前基于 Unix Domain Socket，仅支持 Linux/macOS。
+- 若切换到 bridge 模式，bridge / isabelle-zed-lsp 支持 endpoint 传输：Unix 使用 `unix:/path.sock`，Windows 可使用 `tcp:host:port`。
 - Windows 默认会安装快捷键；如需跳过，设置 `ISABELLE_ZED_SKIP_SHORTCUTS=1`。
 - 单独安装/卸载快捷键：
 
@@ -118,9 +118,11 @@ Native 模式行为提示：
 2. 否则，若 `ROOT/ROOTS` 中仅有一个 session 明确继承 `HOL`（例如 `session X = HOL`），则使用该 session。
 3. 否则默认 `HOL`。
 
-Bridge 模式默认 socket：
+Bridge 模式默认 endpoint：
 
-- `/tmp/isabelle-<worktree-id>.sock`（可通过 `bridge_socket` 覆盖）
+- Unix：`unix:/tmp/isabelle-<worktree-id>.sock`
+- Windows：`tcp:127.0.0.1:<port>`
+- 可通过 `bridge_endpoint` 覆盖（`bridge_socket` 仍兼容旧配置）
 
 Bridge 自动拉起配置说明：
 
@@ -193,7 +195,7 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 Notes:
 
 - The commands above target native mode (`isabelle vscode_server`) and work on Windows/Linux/macOS.
-- Bridge mode currently relies on Unix domain sockets (bridge + isabelle-zed-lsp), so it is Unix-only (Linux/macOS).
+- Bridge mode supports endpoint transport: Unix via `unix:/path.sock`, Windows via `tcp:host:port`.
 - Shortcuts are installed by default; to skip, set `ISABELLE_ZED_SKIP_SHORTCUTS=1`.
 - Install/uninstall shortcuts only:
 
@@ -275,9 +277,11 @@ Auto-selected `-l <logic>` priority (first match wins):
 2. Otherwise, if exactly one session across `ROOT/ROOTS` explicitly inherits `HOL` (e.g. `session X = HOL`), use it.
 3. Otherwise default to `HOL`.
 
-Bridge mode default socket:
+Bridge mode default endpoint:
 
-- `/tmp/isabelle-<worktree-id>.sock` (override via `bridge_socket`)
+- Unix: `unix:/tmp/isabelle-<worktree-id>.sock`
+- Windows: `tcp:127.0.0.1:<port>`
+- Override via `bridge_endpoint` (`bridge_socket` remains supported for legacy configs)
 
 Bridge autostart configuration note:
 

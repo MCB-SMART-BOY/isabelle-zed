@@ -23,6 +23,12 @@ Unix Socket 模式（推荐）：
 ./target/release/bridge --socket /tmp/isabelle.sock
 ```
 
+TCP 模式（跨平台）：
+
+```bash
+./target/release/bridge --tcp 127.0.0.1:39393
+```
+
 Stdin/Stdout 模式：
 
 ```bash
@@ -44,6 +50,7 @@ Mock 模式（CI / 本地可复现测试）：
 ### CLI 参数
 
 - `--socket <PATH>`：监听 Unix Socket；省略则走 stdin/stdout
+- `--tcp <HOST:PORT>`：监听 TCP；与 `--socket` 互斥
 - `--isabelle-path <PATH>`：Isabelle 可执行路径，默认 `isabelle`
 - `--logic <NAME>`：`process_theories` 使用的 logic image，默认 `HOL`
 - `--session-dir <PATH>`：附加 Isabelle session 搜索目录（可重复），会映射到 `process_theories -d <PATH>`
@@ -55,7 +62,7 @@ Mock 模式（CI / 本地可复现测试）：
 - `--debug`：启用 debug 日志并写入滚动日志文件
 
 未设置 `--adapter-socket` 与 `--adapter-command` 时，bridge 会自动拉起内置 Rust real adapter。
-bridge 运行链路使用 Unix Domain Socket，目前仅支持 Unix（Linux/macOS）。
+bridge 监听支持 Unix Socket（`--socket`）和 TCP（`--tcp`）。
 real adapter 的 `markup` 会基于当前文档文本返回符号与行列上下文（语法级 hover，不依赖 Isabelle 语义 API）。
 
 ### 协议示例（精确）
@@ -122,6 +129,12 @@ Unix socket mode (recommended):
 ./target/release/bridge --socket /tmp/isabelle.sock
 ```
 
+TCP mode (cross-platform):
+
+```bash
+./target/release/bridge --tcp 127.0.0.1:39393
+```
+
 Stdin/stdout mode:
 
 ```bash
@@ -143,6 +156,7 @@ External adapter socket mode:
 ### CLI flags
 
 - `--socket <PATH>`: listen on a Unix socket; if omitted uses stdin/stdout
+- `--tcp <HOST:PORT>`: listen on TCP; mutually exclusive with `--socket`
 - `--isabelle-path <PATH>`: Isabelle executable path (default `isabelle`)
 - `--logic <NAME>`: logic image passed to `process_theories` (default `HOL`)
 - `--session-dir <PATH>`: additional Isabelle session search directory (repeatable), mapped to `process_theories -d <PATH>`
@@ -154,7 +168,7 @@ External adapter socket mode:
 - `--debug`: enable debug logging and rotating debug file output
 
 If `--adapter-socket` and `--adapter-command` are both omitted, bridge starts its built-in Rust real adapter.
-The bridge runtime path uses Unix domain sockets and is currently Unix-only (Linux/macOS).
+Bridge listener mode supports both Unix sockets (`--socket`) and TCP (`--tcp`).
 Real-adapter `markup` returns symbol/position context from the current document text (syntax-level hover, without Isabelle semantic hover API).
 
 ### Protocol examples (exact)

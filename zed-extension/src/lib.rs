@@ -8,12 +8,14 @@ const ISABELLE_LANGUAGE_SERVER_ID: &str = "isabelle-lsp";
 const DEFAULT_NATIVE_BINARY: &str = "isabelle";
 const DEFAULT_BRIDGE_BINARY: &str = "isabelle-zed-lsp";
 
+const ENV_BRIDGE_ENDPOINT: &str = "ISABELLE_BRIDGE_ENDPOINT";
 const ENV_BRIDGE_SOCKET: &str = "ISABELLE_BRIDGE_SOCKET";
 const ENV_SESSION: &str = "ISABELLE_SESSION";
 const ENV_BRIDGE_AUTOSTART_CMD: &str = "ISABELLE_BRIDGE_AUTOSTART_CMD";
 const ENV_BRIDGE_AUTOSTART_TIMEOUT_MS: &str = "ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS";
 
 const SETTINGS_KEY_MODE: &str = "mode";
+const SETTINGS_KEY_BRIDGE_ENDPOINT: &str = "bridge_endpoint";
 const SETTINGS_KEY_BRIDGE_SOCKET: &str = "bridge_socket";
 const SETTINGS_KEY_SESSION: &str = "session";
 const SETTINGS_KEY_BRIDGE_AUTOSTART_COMMAND: &str = "bridge_autostart_command";
@@ -184,12 +186,14 @@ fn resolve_environment(
     match mode {
         ServerMode::Native => env,
         ServerMode::Bridge => {
-            let bridge_socket = setting_string(settings_json, SETTINGS_KEY_BRIDGE_SOCKET)
-                .unwrap_or_else(|| default_bridge_socket(worktree));
+            let bridge_endpoint = resolve_bridge_endpoint_setting(worktree, settings_json);
             let session = setting_string(settings_json, SETTINGS_KEY_SESSION)
                 .unwrap_or_else(|| default_session(worktree));
 
-            ensure_env_var(&mut env, ENV_BRIDGE_SOCKET, bridge_socket);
+            ensure_env_var(&mut env, ENV_BRIDGE_ENDPOINT, bridge_endpoint.clone());
+            if let Some(legacy_socket) = legacy_socket_from_endpoint(&bridge_endpoint) {
+                ensure_env_var(&mut env, ENV_BRIDGE_SOCKET, legacy_socket);
+            }
             ensure_env_var(&mut env, ENV_SESSION, session);
 
             env
@@ -197,8 +201,56 @@ fn resolve_environment(
     }
 }
 
+fn resolve_bridge_endpoint_setting(
+    worktree: &zed::Worktree,
+    settings_json: &Option<Value>,
+) -> String {
+    if let Some(endpoint) = setting_string(settings_json, SETTINGS_KEY_BRIDGE_ENDPOINT) {
+        return endpoint;
+    }
+
+    if let Some(socket) = setting_string(settings_json, SETTINGS_KEY_BRIDGE_SOCKET) {
+        return format!("unix:{socket}");
+    }
+
+    default_bridge_endpoint(worktree)
+}
+
+#[cfg(unix)]
 fn default_bridge_socket(worktree: &zed::Worktree) -> String {
     format!("/tmp/isabelle-{}.sock", worktree.id())
+}
+
+fn default_bridge_endpoint(worktree: &zed::Worktree) -> String {
+    #[cfg(unix)]
+    {
+        format!("unix:{}", default_bridge_socket(worktree))
+    }
+    #[cfg(not(unix))]
+    {
+        let worktree_id = worktree.id().to_string();
+        let mut hash: u32 = 0;
+        for byte in worktree_id.as_bytes() {
+            hash = hash.wrapping_mul(31).wrapping_add(u32::from(*byte));
+        }
+        let port = 39_000 + (hash % 1_000);
+        format!("tcp:127.0.0.1:{port}")
+    }
+}
+
+fn legacy_socket_from_endpoint(endpoint: &str) -> Option<String> {
+    if let Some(path) = endpoint.strip_prefix("unix:") {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    } else if endpoint.starts_with('/') {
+        Some(endpoint.to_string())
+    } else {
+        None
+    }
 }
 
 fn default_session(worktree: &zed::Worktree) -> String {
@@ -277,6 +329,7 @@ fn strip_control_settings(settings: Value) -> Option<Value> {
 
     for key in [
         SETTINGS_KEY_MODE,
+        SETTINGS_KEY_BRIDGE_ENDPOINT,
         SETTINGS_KEY_BRIDGE_SOCKET,
         SETTINGS_KEY_SESSION,
         SETTINGS_KEY_BRIDGE_AUTOSTART_COMMAND,
@@ -321,6 +374,7 @@ mod tests {
     fn strip_control_settings_keeps_only_lsp_payload() {
         let input = json!({
             "mode": "bridge",
+            "bridge_endpoint": "tcp:127.0.0.1:39393",
             "bridge_socket": "/tmp/isabelle.sock",
             "session": "s1",
             "bridge_autostart_command": "bridge --socket /tmp/isabelle.sock",
@@ -342,10 +396,24 @@ mod tests {
     fn strip_control_settings_returns_none_for_control_only_input() {
         let input = json!({
             "mode": "bridge",
+            "bridge_endpoint": "tcp:127.0.0.1:39393",
             "bridge_socket": "/tmp/isabelle.sock"
         });
 
         assert_eq!(strip_control_settings(input), None);
+    }
+
+    #[test]
+    fn legacy_socket_from_endpoint_extracts_unix_paths_only() {
+        assert_eq!(
+            legacy_socket_from_endpoint("unix:/tmp/isabelle.sock"),
+            Some("/tmp/isabelle.sock".to_string())
+        );
+        assert_eq!(
+            legacy_socket_from_endpoint("/tmp/isabelle.sock"),
+            Some("/tmp/isabelle.sock".to_string())
+        );
+        assert_eq!(legacy_socket_from_endpoint("tcp:127.0.0.1:39393"), None);
     }
 
     #[test]

@@ -56,7 +56,7 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 说明：
 
 - 上述命令是 native 模式（直接调用 `isabelle vscode_server`），支持 Windows/Linux/macOS。
-- bridge 模式当前依赖 Unix Domain Socket（bridge + isabelle-zed-lsp），仅支持 Linux/macOS。
+- bridge 模式支持跨平台 endpoint：Unix 默认 `unix:/tmp/isabelle-<worktree-id>.sock`，Windows 默认 `tcp:127.0.0.1:<port>`。
 - Windows 默认会安装快捷键；如需跳过，设置 `ISABELLE_ZED_SKIP_SHORTCUTS=1`。
 - 单独安装/卸载快捷键：
 
@@ -127,7 +127,7 @@ Native 模式行为提示：
 
 Bridge 模式的自动拉起说明：
 
-- Bridge 模式默认 socket：`/tmp/isabelle-<worktree-id>.sock`（可通过 `bridge_socket` 覆盖）。
+- Bridge 模式默认 endpoint：Unix 为 `unix:/tmp/isabelle-<worktree-id>.sock`，Windows 为 `tcp:127.0.0.1:<port>`（可通过 `bridge_endpoint` 覆盖，`bridge_socket` 仍兼容旧配置）。
 - 出于安全考虑，`bridge_autostart_command` / `bridge_autostart_timeout_ms` 不再从工作区 `settings.json` 读取。
 - 如需自动拉起 bridge，请在启动 Zed 前通过环境变量设置：
   - `ISABELLE_BRIDGE_AUTOSTART_CMD`
@@ -179,12 +179,15 @@ cargo run -p isabelle-zed-xtask -- bridge-mock-down
 ### Bridge 真实链路（adapter-command）
 
 bridge 默认真实模式会自动拉起内置 Rust adapter（无需 Scala / sbt）。
-当前 bridge / bridge-mode LSP 链路基于 Unix Domain Socket，仅支持 Unix（Linux/macOS）。
+bridge / bridge-mode LSP 链路支持两类监听端点：
+- `--socket <path>`（Unix）
+- `--tcp <host:port>`（跨平台）
 
 你也可以显式指定自定义启动命令：
 
 ```bash
 bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
+bridge --tcp 127.0.0.1:39393 --adapter-command "<your-adapter-cmd>"
 ```
 
 `--adapter-command` 会按 argv 解析后直接执行（不经 `bash -lc`）。
@@ -272,7 +275,7 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 Notes:
 
 - The commands above target native mode (`isabelle vscode_server`) and work on Windows/Linux/macOS.
-- Bridge mode currently relies on Unix domain sockets (bridge + isabelle-zed-lsp), so it is Unix-only (Linux/macOS).
+- Bridge mode now supports cross-platform endpoints: Unix defaults to `unix:/tmp/isabelle-<worktree-id>.sock`, Windows defaults to `tcp:127.0.0.1:<port>`.
 - Shortcuts are installed by default; to skip, set `ISABELLE_ZED_SKIP_SHORTCUTS=1`.
 - Install/uninstall shortcuts only:
 
@@ -343,7 +346,7 @@ Auto-selected `-l <logic>` priority (first match wins):
 
 Bridge autostart configuration note:
 
-- Bridge mode default socket: `/tmp/isabelle-<worktree-id>.sock` (override via `bridge_socket`).
+- Bridge mode default endpoint: Unix `unix:/tmp/isabelle-<worktree-id>.sock`, Windows `tcp:127.0.0.1:<port>` (override via `bridge_endpoint`; legacy `bridge_socket` remains supported).
 - For security hardening, `bridge_autostart_command` / `bridge_autostart_timeout_ms` are no longer read from workspace `settings.json`.
 - To enable bridge autostart, set environment variables before launching Zed:
   - `ISABELLE_BRIDGE_AUTOSTART_CMD`
@@ -395,12 +398,15 @@ cargo run -p isabelle-zed-xtask -- bridge-mock-down
 ### Bridge real-path startup (adapter-command)
 
 In real mode, bridge starts its built-in Rust adapter by default (no Scala / sbt dependency).
-The bridge / bridge-mode LSP path currently uses Unix domain sockets and is Unix-only (Linux/macOS).
+The bridge / bridge-mode LSP path supports two listen endpoint styles:
+- `--socket <path>` (Unix)
+- `--tcp <host:port>` (cross-platform)
 
 You can also provide an explicit startup command:
 
 ```bash
 bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
+bridge --tcp 127.0.0.1:39393 --adapter-command "<your-adapter-cmd>"
 ```
 
 `--adapter-command` is parsed into argv and executed directly (without `bash -lc`).

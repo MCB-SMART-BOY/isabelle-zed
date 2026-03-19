@@ -1,12 +1,9 @@
-#[cfg(not(unix))]
-compile_error!("isabelle-zed-lsp currently supports Unix only (requires Unix domain sockets)");
-
 mod autostart;
 mod diagnostics;
 mod push;
 mod transport;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
     DocumentCheckPayload, MarkupPayload, Message, MessageType, Position as BridgePosition,
@@ -28,16 +25,21 @@ use tower_lsp::lsp_types::{
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use transport::BridgeError;
-use transport::BridgeTransport;
+use transport::{BridgeEndpoint, BridgeTransport};
 
-const DEFAULT_BRIDGE_SOCKET: &str = "/tmp/isabelle.sock";
+#[cfg(unix)]
+const DEFAULT_BRIDGE_UNIX_SOCKET: &str = "/tmp/isabelle.sock";
+#[cfg(not(unix))]
+const DEFAULT_BRIDGE_TCP_ENDPOINT: &str = "127.0.0.1:39393";
 const DEFAULT_SESSION: &str = "s1";
 const DEFAULT_BRIDGE_AUTOSTART_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_PUSH_DEBOUNCE_MS: u64 = 200;
 
+const ENV_BRIDGE_ENDPOINT: &str = "ISABELLE_BRIDGE_ENDPOINT";
+const ENV_BRIDGE_SOCKET: &str = "ISABELLE_BRIDGE_SOCKET";
 const ENV_BRIDGE_AUTOSTART_CMD: &str = "ISABELLE_BRIDGE_AUTOSTART_CMD";
 const ENV_BRIDGE_AUTOSTART_TIMEOUT_MS: &str = "ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS";
 const ENV_BRIDGE_REQUEST_TIMEOUT_MS: &str = "ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS";
@@ -64,11 +66,11 @@ struct IsabelleLanguageServer {
 impl IsabelleLanguageServer {
     fn new(
         client: Client,
-        bridge_socket: PathBuf,
+        bridge_endpoint: BridgeEndpoint,
         session: String,
         request_timeout: Duration,
     ) -> Self {
-        let bridge = BridgeTransport::new(bridge_socket, session, request_timeout);
+        let bridge = BridgeTransport::new(bridge_endpoint, session, request_timeout);
         let documents = Arc::new(RwLock::new(HashMap::new()));
         let published_diagnostic_targets = Arc::new(RwLock::new(HashMap::new()));
         let session_running = Arc::new(RwLock::new(true));
@@ -490,6 +492,37 @@ fn lsp_position_to_bridge(position: Position) -> BridgePosition {
     }
 }
 
+fn default_bridge_endpoint() -> BridgeEndpoint {
+    #[cfg(unix)]
+    {
+        BridgeEndpoint::Unix(PathBuf::from(DEFAULT_BRIDGE_UNIX_SOCKET))
+    }
+    #[cfg(not(unix))]
+    {
+        BridgeEndpoint::Tcp(DEFAULT_BRIDGE_TCP_ENDPOINT.to_string())
+    }
+}
+
+fn resolve_bridge_endpoint() -> BridgeEndpoint {
+    if let Ok(raw) = std::env::var(ENV_BRIDGE_ENDPOINT) {
+        match BridgeEndpoint::parse(&raw) {
+            Ok(endpoint) => return endpoint,
+            Err(err) => {
+                error!(
+                    "invalid {}='{}': {}; using default endpoint",
+                    ENV_BRIDGE_ENDPOINT, raw, err
+                );
+            }
+        }
+    }
+
+    if let Ok(raw_socket) = std::env::var(ENV_BRIDGE_SOCKET) {
+        return BridgeEndpoint::Unix(PathBuf::from(raw_socket));
+    }
+
+    default_bridge_endpoint()
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -500,9 +533,7 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let bridge_socket = std::env::var("ISABELLE_BRIDGE_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(DEFAULT_BRIDGE_SOCKET));
+    let bridge_endpoint = resolve_bridge_endpoint();
     let session = std::env::var("ISABELLE_SESSION").unwrap_or_else(|_| DEFAULT_SESSION.to_string());
     let request_timeout = std::env::var(ENV_BRIDGE_REQUEST_TIMEOUT_MS)
         .ok()
@@ -510,7 +541,7 @@ async fn main() {
         .map(Duration::from_millis)
         .unwrap_or_else(|| Duration::from_millis(DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS));
     let mut bridge_child = autostart::autostart_bridge_if_needed(
-        &bridge_socket,
+        &bridge_endpoint,
         ENV_BRIDGE_AUTOSTART_CMD,
         ENV_BRIDGE_AUTOSTART_TIMEOUT_MS,
         DEFAULT_BRIDGE_AUTOSTART_TIMEOUT_MS,
@@ -523,7 +554,7 @@ async fn main() {
     let (service, socket) = LspService::new(|client| {
         IsabelleLanguageServer::new(
             client,
-            bridge_socket.clone(),
+            bridge_endpoint.clone(),
             session.clone(),
             request_timeout,
         )
@@ -545,9 +576,12 @@ mod tests {
         diagnostics_message_from_request, parse_message, to_ndjson,
     };
     use serde_json::json;
+    #[cfg(unix)]
     use tempfile::tempdir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    #[cfg(unix)]
     use tokio::net::UnixListener;
+    #[cfg(unix)]
     use tokio::time::sleep;
     use tower_lsp::lsp_types::DiagnosticSeverity;
 
@@ -572,6 +606,7 @@ mod tests {
         assert_eq!(mapped.message, "warning message");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bridge_transport_round_trip() {
         let temp = tempdir().expect("tempdir");
@@ -601,7 +636,11 @@ mod tests {
                 .expect("write diagnostics");
         });
 
-        let transport = BridgeTransport::new(socket_path, "s1".to_string(), Duration::from_secs(2));
+        let transport = BridgeTransport::new(
+            BridgeEndpoint::Unix(socket_path),
+            "s1".to_string(),
+            Duration::from_secs(2),
+        );
         let payload = serde_json::to_value(DocumentPushPayload {
             uri: "file:///home/user/example.thy".to_string(),
             text: "theory Example imports Main begin\nend\n".to_string(),
@@ -623,6 +662,7 @@ mod tests {
         server.await.expect("mock bridge server should finish");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bridge_transport_ignores_unmatched_response_ids() {
         let temp = tempdir().expect("tempdir");
@@ -666,7 +706,11 @@ mod tests {
                 .expect("write diagnostics");
         });
 
-        let transport = BridgeTransport::new(socket_path, "s1".to_string(), Duration::from_secs(2));
+        let transport = BridgeTransport::new(
+            BridgeEndpoint::Unix(socket_path),
+            "s1".to_string(),
+            Duration::from_secs(2),
+        );
         let payload = serde_json::to_value(DocumentPushPayload {
             uri: "file:///home/user/example.thy".to_string(),
             text: "theory Example imports Main begin\nend\n".to_string(),
@@ -683,6 +727,7 @@ mod tests {
         server.await.expect("mock bridge server should finish");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bridge_transport_times_out_when_bridge_does_not_reply() {
         let temp = tempdir().expect("tempdir");
@@ -700,8 +745,11 @@ mod tests {
             }
         });
 
-        let transport =
-            BridgeTransport::new(socket_path, "s1".to_string(), Duration::from_millis(100));
+        let transport = BridgeTransport::new(
+            BridgeEndpoint::Unix(socket_path),
+            "s1".to_string(),
+            Duration::from_millis(100),
+        );
         let payload = serde_json::to_value(DocumentPushPayload {
             uri: "file:///home/user/example.thy".to_string(),
             text: "theory Example imports Main begin\nend\n".to_string(),

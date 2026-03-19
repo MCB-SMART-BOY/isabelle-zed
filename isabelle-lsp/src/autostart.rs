@@ -1,9 +1,11 @@
+use crate::transport::BridgeEndpoint;
 use shell_words::split as split_shell_words;
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
-use std::path::Path;
 use std::process::Stdio;
+use tokio::net::TcpStream;
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio::time::Duration;
@@ -19,23 +21,24 @@ pub(crate) fn parse_autostart_command(command: &str) -> Result<(String, Vec<Stri
 }
 
 pub(crate) async fn autostart_bridge_if_needed(
-    socket_path: &Path,
+    endpoint: &BridgeEndpoint,
     command_env: &str,
     timeout_env: &str,
     default_timeout_ms: u64,
 ) -> Option<Child> {
-    if socket_path.exists() {
-        if socket_is_healthy(socket_path).await {
-            return None;
-        }
+    if endpoint_is_healthy(endpoint).await {
+        return None;
+    }
 
-        if let Err(err) = remove_stale_socket(socket_path) {
-            error!(
-                "failed to remove stale bridge socket {}: {err}",
-                socket_path.display()
-            );
-            return None;
-        }
+    if let BridgeEndpoint::Unix(path) = endpoint
+        && path.exists()
+        && let Err(err) = remove_stale_socket(path)
+    {
+        error!(
+            "failed to remove stale bridge socket {}: {err}",
+            path.display()
+        );
+        return None;
     }
 
     let command = std::env::var(command_env).ok()?;
@@ -71,10 +74,10 @@ pub(crate) async fn autostart_bridge_if_needed(
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default_timeout_ms);
 
-    if !wait_for_socket(socket_path, Duration::from_millis(timeout_ms)).await {
+    if !wait_for_endpoint(endpoint, Duration::from_millis(timeout_ms)).await {
         warn!(
-            "bridge autostart command launched but socket {} was not ready within {}ms",
-            socket_path.display(),
+            "bridge autostart command launched but endpoint {} was not ready within {}ms",
+            endpoint.describe(),
             timeout_ms
         );
     }
@@ -82,24 +85,50 @@ pub(crate) async fn autostart_bridge_if_needed(
     Some(child)
 }
 
-async fn socket_is_healthy(socket_path: &Path) -> bool {
-    match tokio::time::timeout(Duration::from_millis(200), UnixStream::connect(socket_path)).await {
-        Ok(Ok(stream)) => {
-            drop(stream);
-            true
+async fn endpoint_is_healthy(endpoint: &BridgeEndpoint) -> bool {
+    match endpoint {
+        BridgeEndpoint::Unix(path) => {
+            #[cfg(unix)]
+            {
+                match tokio::time::timeout(Duration::from_millis(200), UnixStream::connect(path))
+                    .await
+                {
+                    Ok(Ok(stream)) => {
+                        drop(stream);
+                        true
+                    }
+                    Ok(Err(err)) => {
+                        debug!("bridge socket {} is not connectable: {err}", path.display());
+                        false
+                    }
+                    Err(_) => false,
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                false
+            }
         }
-        Ok(Err(err)) => {
-            debug!(
-                "bridge socket {} is not connectable: {err}",
-                socket_path.display()
-            );
-            false
+        BridgeEndpoint::Tcp(address) => {
+            match tokio::time::timeout(Duration::from_millis(200), TcpStream::connect(address))
+                .await
+            {
+                Ok(Ok(stream)) => {
+                    drop(stream);
+                    true
+                }
+                Ok(Err(err)) => {
+                    debug!("bridge tcp endpoint {} is not connectable: {err}", address);
+                    false
+                }
+                Err(_) => false,
+            }
         }
-        Err(_) => false,
     }
 }
 
-fn remove_stale_socket(socket_path: &Path) -> Result<(), std::io::Error> {
+fn remove_stale_socket(socket_path: &std::path::Path) -> Result<(), std::io::Error> {
     let metadata = std::fs::symlink_metadata(socket_path)?;
     #[cfg(unix)]
     {
@@ -124,10 +153,10 @@ fn remove_stale_socket(socket_path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
-async fn wait_for_socket(socket_path: &Path, timeout: Duration) -> bool {
+async fn wait_for_endpoint(endpoint: &BridgeEndpoint, timeout: Duration) -> bool {
     let start = tokio::time::Instant::now();
     while start.elapsed() <= timeout {
-        if socket_path.exists() {
+        if endpoint_is_healthy(endpoint).await {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

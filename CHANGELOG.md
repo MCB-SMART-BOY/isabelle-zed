@@ -18,7 +18,7 @@ All notable changes to this project are documented in this file.
 - `zed-extension` now isolates ROOT/ROOTS session parsing and auto-logic selection in `session_logic.rs`.
 - bridge `--adapter-command` now parses argv and executes directly, removing the `bash -lc` execution path.
 - CI/release workflows now enforce workspace-wide quality gates (`fmt`, `clippy -D warnings`, `test`, wasm target check) before E2E/package steps.
-- docs now explicitly describe native-mode cross-platform behavior vs Unix-only bridge-mode constraints.
+- bridge mode transport is now endpoint-based (`unix:/path` or `tcp:host:port`) across bridge/lsp/extension wiring.
 - bridge integration test path for `--adapter-command` no longer depends on `python3`.
 - `isabelle.start_session` now logs “started” only after a successful start/check flow.
 - documentation and runtime hints now use direct `cargo`/`xtask` commands (no `make` indirection).
@@ -27,6 +27,7 @@ All notable changes to this project are documented in this file.
 - bridge real-adapter now supports repeatable `--session-dir` (mapped to `process_theories -d`) and auto-adds the checked file's parent directory to session lookup paths.
 - bridge real-adapter now caches diagnostics by in-memory document content/version, avoiding redundant `process_theories` runs for unchanged text.
 - added `cargo run -p isabelle-zed-xtask -- bridge-real-smoke` for local real-adapter smoke validation against malformed theory input.
+- bridge now supports `--tcp <host:port>` listener mode in addition to Unix `--socket`.
 
 ### Removed
 

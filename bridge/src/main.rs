@@ -1,16 +1,17 @@
-#[cfg(not(unix))]
-compile_error!("isabelle-bridge currently supports Unix only (requires Unix domain sockets)");
-
 use bridge::process::{ProcessError, ProcessManager, run_mock_adapter, run_real_adapter};
 use bridge::protocol::{MessageType, parse_message};
 use bridge::queue::{DebounceQueue, QueueError};
 use clap::Parser;
+#[cfg(unix)]
 use std::io::ErrorKind;
+#[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 use std::path::PathBuf;
 use std::time::Instant;
 use thiserror::Error;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::time::{Duration, MissedTickBehavior};
 use tracing::{debug, error, info, warn};
@@ -24,6 +25,9 @@ use tracing_subscriber::prelude::*;
 struct Args {
     #[arg(long)]
     socket: Option<PathBuf>,
+
+    #[arg(long)]
+    tcp: Option<String>,
 
     #[arg(long, default_value = "isabelle")]
     isabelle_path: String,
@@ -78,6 +82,8 @@ enum BridgeError {
     Process(#[from] ProcessError),
     #[error("queue error: {0}")]
     Queue(#[from] QueueError),
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 #[tokio::main]
@@ -104,8 +110,16 @@ async fn main() -> Result<(), BridgeError> {
         mock: args.mock,
     };
 
+    if args.socket.is_some() && args.tcp.is_some() {
+        return Err(BridgeError::Config(
+            "cannot use --socket and --tcp together".to_string(),
+        ));
+    }
+
     if let Some(socket_path) = args.socket {
         run_socket_server(&socket_path, session).await
+    } else if let Some(tcp_address) = args.tcp {
+        run_tcp_server(&tcp_address, session).await
     } else {
         run_stdio(session).await
     }
@@ -149,6 +163,7 @@ fn setup_logging(
     Ok(None)
 }
 
+#[cfg(unix)]
 async fn run_socket_server(
     socket_path: &PathBuf,
     session: SessionConfig,
@@ -182,10 +197,43 @@ async fn run_socket_server(
     }
 }
 
+#[cfg(not(unix))]
+async fn run_socket_server(
+    socket_path: &PathBuf,
+    session: SessionConfig,
+) -> Result<(), BridgeError> {
+    let _ = socket_path;
+    let _ = session;
+    Err(BridgeError::Config(
+        "--socket is only supported on unix platforms; use --tcp <host:port> instead".to_string(),
+    ))
+}
+
+async fn run_tcp_server(tcp_address: &str, session: SessionConfig) -> Result<(), BridgeError> {
+    let listener = TcpListener::bind(tcp_address).await?;
+    info!("bridge listening on tcp {}", tcp_address);
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let session = session.clone();
+        tokio::spawn(async move {
+            if let Err(err) = handle_tcp_client(stream, session).await {
+                error!("tcp client session failed: {err}");
+            }
+        });
+    }
+}
+
+#[cfg(unix)]
 async fn handle_socket_client(
     stream: UnixStream,
     session: SessionConfig,
 ) -> Result<(), BridgeError> {
+    let (reader, writer) = stream.into_split();
+    run_session(BufReader::new(reader), writer, session).await
+}
+
+async fn handle_tcp_client(stream: TcpStream, session: SessionConfig) -> Result<(), BridgeError> {
     let (reader, writer) = stream.into_split();
     run_session(BufReader::new(reader), writer, session).await
 }

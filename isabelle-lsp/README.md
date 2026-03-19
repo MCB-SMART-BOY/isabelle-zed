@@ -3,7 +3,7 @@
 ## 中文（简体）
 
 `isabelle-zed-lsp` 是一个轻量 LSP 服务器，将标准 LSP 消息转换为 `bridge` 使用的 NDJSON 协议。
-该代理通过 Unix Domain Socket 与 bridge 通信，目前仅支持 Unix（Linux/macOS）。
+该代理通过 endpoint（Unix Socket 或 TCP）与 bridge 通信。
 
 ### 主要映射
 
@@ -26,15 +26,16 @@ cargo build -p isabelle-zed-lsp --release
 ### 运行（在 `<repo-root>`）
 
 ```bash
-ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
+ISABELLE_BRIDGE_ENDPOINT=unix:/tmp/isabelle.sock \
   cargo run -p isabelle-zed-lsp --release
 ```
 
 可选环境变量：
 
-- `ISABELLE_BRIDGE_SOCKET`（默认 `/tmp/isabelle.sock`）
+- `ISABELLE_BRIDGE_ENDPOINT`（推荐）：`unix:/path.sock` 或 `tcp:host:port`
+- `ISABELLE_BRIDGE_SOCKET`（兼容旧配置，等价于 `unix:/path.sock`）
 - `ISABELLE_SESSION`（默认 `s1`）
-- `ISABELLE_BRIDGE_AUTOSTART_CMD`（可选）：bridge socket 不存在时用于自动拉起 bridge 的命令行（按 argv 解析，不经 `bash -lc`）
+- `ISABELLE_BRIDGE_AUTOSTART_CMD`（可选）：bridge endpoint 不可达时用于自动拉起 bridge 的命令行（按 argv 解析，不经 `bash -lc`）
 - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS`（默认 `5000`）
 - `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS`（默认 `30000`）：单次 bridge 请求超时时间，超时会重连重试一次
 
@@ -47,7 +48,7 @@ ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
 ## English
 
 `isabelle-zed-lsp` is a lightweight LSP server that translates standard LSP messages into the bridge NDJSON protocol.
-It communicates with bridge over Unix domain sockets and is currently Unix-only (Linux/macOS).
+It communicates with bridge over endpoint transport (Unix socket or TCP).
 
 ### Message mapping
 
@@ -70,15 +71,16 @@ cargo build -p isabelle-zed-lsp --release
 ### Run (from `<repo-root>`)
 
 ```bash
-ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
+ISABELLE_BRIDGE_ENDPOINT=unix:/tmp/isabelle.sock \
   cargo run -p isabelle-zed-lsp --release
 ```
 
 Optional environment variables:
 
-- `ISABELLE_BRIDGE_SOCKET` (default: `/tmp/isabelle.sock`)
+- `ISABELLE_BRIDGE_ENDPOINT` (recommended): `unix:/path.sock` or `tcp:host:port`
+- `ISABELLE_BRIDGE_SOCKET` (legacy compatibility, interpreted as `unix:/path.sock`)
 - `ISABELLE_SESSION` (default: `s1`)
-- `ISABELLE_BRIDGE_AUTOSTART_CMD` (optional): command line used to auto-start bridge when socket is missing (parsed into argv, without `bash -lc`)
+- `ISABELLE_BRIDGE_AUTOSTART_CMD` (optional): command line used to auto-start bridge when endpoint is unreachable (parsed into argv, without `bash -lc`)
 - `ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS` (default: `5000`)
 - `ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS` (default: `30000`): per-request timeout for bridge calls, with one reconnect retry
 

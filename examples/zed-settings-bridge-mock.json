@@ -6,7 +6,7 @@
       },
       "settings": {
         "mode": "bridge",
-        "bridge_socket": "/tmp/isabelle.sock",
+        "bridge_endpoint": "unix:/tmp/isabelle.sock",
         "session": "s1"
       }
     }
