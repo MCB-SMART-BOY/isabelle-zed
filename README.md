@@ -14,8 +14,12 @@ bridge 模式（集成测试/实验）：
   Zed Extension (WASM)
     -> isabelle-zed-lsp (Rust LSP proxy)
     -> bridge (Rust NDJSON bridge)
-    -> scala-adapter (mock or Isabelle-backed)
+    -> 内置 Rust adapter（mock 或 Isabelle-backed）
 ```
+
+项目结构与分层约定见：
+
+- `docs/project-structure.md`
 
 ### 零配置安装（推荐）
 
@@ -42,26 +46,21 @@ make build-isabelle-grammar
 make uninstall-zed-native
 ```
 
-Windows 原生安装（PowerShell）：
+Windows 原生安装/卸载与 Linux/macOS 使用同一套 Rust 命令：
 
-```powershell
-./scripts/install_zed_native_windows.ps1
-```
-
-卸载：
-
-```powershell
-./scripts/uninstall_zed_native_windows.ps1
+```bash
+cargo run -p isabelle-zed-xtask -- install-zed-native
+cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 ```
 
 说明：
 
-- Windows 脚本默认会安装快捷键；如需跳过，设置 `ISABELLE_ZED_SKIP_SHORTCUTS=1` 或传 `-SkipShortcuts`。
+- Windows 默认会安装快捷键；如需跳过，设置 `ISABELLE_ZED_SKIP_SHORTCUTS=1`。
 - 单独安装/卸载快捷键：
 
-```powershell
-./scripts/install_zed_shortcuts_windows.ps1
-./scripts/uninstall_zed_shortcuts_windows.ps1
+```bash
+cargo run -p isabelle-zed-xtask -- install-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 ```
 
 - 若 keymap 不在默认位置，设置 `ISABELLE_ZED_KEYMAP_PATH` 指向实际文件。
@@ -177,11 +176,7 @@ make bridge-mock-down
 
 ### Bridge 真实链路（adapter-command）
 
-bridge 默认真实模式会优先尝试在仓库内定位 `scala-adapter` 并启动：
-
-```bash
-sbt -batch "run --isabelle-path=isabelle"
-```
+bridge 默认真实模式会自动拉起内置 Rust adapter（无需 Scala / sbt）。
 
 你也可以显式指定自定义启动命令：
 
@@ -227,8 +222,12 @@ bridge mode (integration/testing):
   Zed Extension (WASM)
     -> isabelle-zed-lsp (Rust LSP proxy)
     -> bridge (Rust NDJSON bridge)
-    -> scala-adapter (mock or Isabelle-backed)
+    -> built-in Rust adapter (mock or Isabelle-backed)
 ```
+
+Project layout and structure conventions:
+
+- `docs/project-structure.md`
 
 ### Zero-config install (recommended)
 
@@ -255,26 +254,21 @@ Uninstall:
 make uninstall-zed-native
 ```
 
-Windows native install (PowerShell):
+Windows uses the same Rust command entrypoints as Linux/macOS:
 
-```powershell
-./scripts/install_zed_native_windows.ps1
-```
-
-Uninstall:
-
-```powershell
-./scripts/uninstall_zed_native_windows.ps1
+```bash
+cargo run -p isabelle-zed-xtask -- install-zed-native
+cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 ```
 
 Notes:
 
-- Windows script installs shortcuts by default; to skip, set `ISABELLE_ZED_SKIP_SHORTCUTS=1` or pass `-SkipShortcuts`.
+- Shortcuts are installed by default; to skip, set `ISABELLE_ZED_SKIP_SHORTCUTS=1`.
 - Install/uninstall shortcuts only:
 
-```powershell
-./scripts/install_zed_shortcuts_windows.ps1
-./scripts/uninstall_zed_shortcuts_windows.ps1
+```bash
+cargo run -p isabelle-zed-xtask -- install-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 ```
 
 - If your keymap lives elsewhere, set `ISABELLE_ZED_KEYMAP_PATH` to the actual file.
@@ -390,11 +384,7 @@ make bridge-mock-down
 
 ### Bridge real-path startup (adapter-command)
 
-In real mode, bridge now tries to locate local `scala-adapter` and starts:
-
-```bash
-sbt -batch "run --isabelle-path=isabelle"
-```
+In real mode, bridge starts its built-in Rust adapter by default (no Scala / sbt dependency).
 
 You can also provide an explicit startup command:
 

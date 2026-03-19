@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- bridge default real mode now starts a built-in Rust real-adapter subprocess (`--real-adapter`) instead of depending on Scala/sbt fallback discovery.
+- build/release/install/check automation is now unified under Rust `xtask` commands and wired into `Makefile` and GitHub workflows.
+- repository Cargo setup is now a single root workspace (`bridge` / `isabelle-lsp` / `zed-extension` / `xtask`) with shared dependency version management.
+- workspace command style is now standardized on package-based Cargo entrypoints (`cargo -p ...` / `cargo run -p isabelle-zed-xtask -- ...`) across Makefile, CI, and docs.
+- added `docs/project-structure.md` to document repository layering and governance conventions.
+- xtask implementation is now split into layered modules (`cli` / `common` / `commands/*`) instead of a single monolithic `main.rs`.
+- fixed `xtask doctor` artifact checks to use workspace-level `target/...` paths consistently.
+
+### Removed
+
+- removed `scala-adapter/` (Scala codebase) from the runtime/tooling path.
+- removed non-Rust helper scripts under `scripts/` (shell/python/powershell), replaced by Rust tooling commands.
+- removed redundant root placeholder crate (`src/lib.rs`) and member lockfile duplication (`zed-extension/Cargo.lock`).
+
 ## [0.2.3] - 2026-03-05
 
 ### Added

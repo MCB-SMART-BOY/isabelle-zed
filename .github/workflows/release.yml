@@ -23,7 +23,7 @@ jobs:
           targets: wasm32-wasip2
 
       - name: Build package
-        run: ./scripts/package_release.sh --platform linux-x86_64
+        run: cargo run -p isabelle-zed-xtask -- release-package --platform linux-x86_64
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4

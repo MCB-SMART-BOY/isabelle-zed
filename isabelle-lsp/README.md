@@ -19,14 +19,14 @@
 ### 构建（在 `<repo-root>`）
 
 ```bash
-cargo build --manifest-path isabelle-lsp/Cargo.toml --release
+cargo build -p isabelle-zed-lsp --release
 ```
 
 ### 运行（在 `<repo-root>`）
 
 ```bash
 ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
-  cargo run --manifest-path isabelle-lsp/Cargo.toml --release
+  cargo run -p isabelle-zed-lsp --release
 ```
 
 可选环境变量：
@@ -61,14 +61,14 @@ Command semantics:
 ### Build (from `<repo-root>`)
 
 ```bash
-cargo build --manifest-path isabelle-lsp/Cargo.toml --release
+cargo build -p isabelle-zed-lsp --release
 ```
 
 ### Run (from `<repo-root>`)
 
 ```bash
 ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
-  cargo run --manifest-path isabelle-lsp/Cargo.toml --release
+  cargo run -p isabelle-zed-lsp --release
 ```
 
 Optional environment variables:

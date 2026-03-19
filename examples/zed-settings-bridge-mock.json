@@ -2,7 +2,7 @@
   "lsp": {
     "isabelle-lsp": {
       "binary": {
-        "path": "/absolute/path/to/<repo-root>/isabelle-lsp/target/release/isabelle-zed-lsp"
+        "path": "/absolute/path/to/<repo-root>/target/release/isabelle-zed-lsp"
       },
       "settings": {
         "mode": "bridge",

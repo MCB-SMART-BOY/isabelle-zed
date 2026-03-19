@@ -1,8 +1,10 @@
 SHELL := /bin/bash
 .ONESHELL:
 
+XTASK := cargo run -p isabelle-zed-xtask --
+
 .PHONY: bridge-build bridge-test bridge-clippy \
-	 scala-test \
+	 adapter-test \
 	 lsp-build lsp-test lsp-clippy \
 	 zed-build zed-check \
 	 zed-official-check \
@@ -20,97 +22,85 @@ SHELL := /bin/bash
 	 native-lsp-smoke spawn-e2e-ndjson
 
 bridge-build:
-	cargo build --manifest-path bridge/Cargo.toml
+	cargo build -p isabelle-bridge
 
 bridge-test:
-	cargo test --manifest-path bridge/Cargo.toml
+	cargo test -p isabelle-bridge
 
 bridge-clippy:
-	cargo clippy --manifest-path bridge/Cargo.toml -- -D warnings
+	cargo clippy -p isabelle-bridge -- -D warnings
 
-scala-test:
-	cd scala-adapter && sbt test
+adapter-test:
+	cargo test -p isabelle-bridge process::real_adapter_tests
 
 lsp-build:
-	cargo build --manifest-path isabelle-lsp/Cargo.toml
+	cargo build -p isabelle-zed-lsp
 
 lsp-test:
-	cargo test --manifest-path isabelle-lsp/Cargo.toml
+	cargo test -p isabelle-zed-lsp
 
 lsp-clippy:
-	cargo clippy --manifest-path isabelle-lsp/Cargo.toml -- -D warnings
+	cargo clippy -p isabelle-zed-lsp -- -D warnings
 
 zed-build:
-	cargo build --manifest-path zed-extension/Cargo.toml --target wasm32-wasip2
+	cargo build -p isabelle-zed-extension --target wasm32-wasip2
 
 zed-check:
-	cargo check --manifest-path zed-extension/Cargo.toml
+	cargo check -p isabelle-zed-extension
 
 zed-official-check:
-	./scripts/zed_official_check.sh
+	$(XTASK) zed-official-check
 
 build-isabelle-grammar:
-	./scripts/build_isabelle_grammar.sh
+	$(XTASK) build-isabelle-grammar
 
 doctor:
-	./scripts/doctor.sh
+	$(XTASK) doctor
 
 release-build:
-	./scripts/build_release.sh
+	$(XTASK) release-build
 
 install-local:
-	./scripts/install_local.sh
+	$(XTASK) install-local
 
 install-zed-native:
-	./scripts/install_zed_native.sh
+	$(XTASK) install-zed-native
 
 uninstall-zed-native:
-	./scripts/uninstall_zed_native.sh
+	$(XTASK) uninstall-zed-native
 
 install-zed-shortcuts:
-	./scripts/install_zed_shortcuts.sh
+	$(XTASK) install-zed-shortcuts
 
 uninstall-zed-shortcuts:
-	./scripts/uninstall_zed_shortcuts.sh
+	$(XTASK) uninstall-zed-shortcuts
 
 release-package:
-	./scripts/package_release.sh
+	$(XTASK) release-package
 
 bridge-mock-up:
-	./scripts/bridge_mock_up.sh /tmp/isabelle.sock
+	$(XTASK) bridge-mock-up /tmp/isabelle.sock
 
 bridge-mock-down:
-	./scripts/bridge_mock_down.sh /tmp/isabelle.sock
+	$(XTASK) bridge-mock-down /tmp/isabelle.sock
 
 mock-bridge:
-	cargo run --manifest-path bridge/Cargo.toml -- --mock --socket /tmp/isabelle.sock
+	cargo run -p isabelle-bridge -- --mock --socket /tmp/isabelle.sock
 
 mock-bridge-adapter:
-	cargo run --manifest-path bridge/Cargo.toml -- --socket /tmp/isabelle.sock --adapter-socket 127.0.0.1:9011
+	cargo run -p isabelle-bridge -- --socket /tmp/isabelle.sock --adapter-socket 127.0.0.1:9011
 
 mock-adapter:
-	cd scala-adapter && sbt "run --mock --socket=127.0.0.1:9011"
+	cargo run -p isabelle-bridge -- --real-adapter
 
 mock-send:
-	python3 scripts/mock_send.py
+	$(XTASK) mock-send /tmp/isabelle.sock
 
 mock-lsp-e2e:
-	cargo build --manifest-path bridge/Cargo.toml
-	cargo build --manifest-path isabelle-lsp/Cargo.toml
-	cargo run --manifest-path bridge/Cargo.toml -- --mock --socket /tmp/isabelle.sock >/tmp/bridge-local.log 2>&1 &
-	bridge_pid=$$!
-	trap 'kill $$bridge_pid 2>/dev/null || true; rm -f /tmp/isabelle.sock' EXIT
-	for i in $$(seq 1 80); do
-	  if [ -S /tmp/isabelle.sock ]; then
-	    break
-	  fi
-	  sleep 0.1
-	done
-	python3 scripts/mock_lsp_e2e.py
+	$(XTASK) mock-lsp-e2e
 
 native-lsp-smoke:
-	python3 scripts/native_lsp_smoke.py
+	$(XTASK) native-lsp-smoke
 
 spawn-e2e-ndjson:
-	cargo build --manifest-path bridge/Cargo.toml
-	python3 scripts/spawn_e2e_ndjson.py
+	$(XTASK) spawn-e2e-ndjson

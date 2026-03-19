@@ -2,12 +2,12 @@
 
 ## 中文（简体）
 
-`bridge` 是 Rust 编写的 NDJSON 路由器，用于在编辑器与 Isabelle Scala 适配器之间转发消息。
+`bridge` 是 Rust 编写的 NDJSON 路由器，用于在编辑器与 Isabelle adapter 后端之间转发消息。
 
 ### 路径约定
 
 本页命令默认在 `bridge/` 目录执行。
-如果你在仓库根目录（`<repo-root>`）执行，请加上 `--manifest-path bridge/Cargo.toml`。
+如果你在仓库根目录（`<repo-root>`）执行，请使用 `-p isabelle-bridge`。
 
 ### 构建
 
@@ -35,7 +35,7 @@ Mock 模式（CI / 本地可复现测试）：
 ./target/release/bridge --mock --socket /tmp/isabelle.sock
 ```
 
-外部 Scala 适配器 Socket 模式：
+外部适配器 Socket 模式：
 
 ```bash
 ./target/release/bridge --socket /tmp/isabelle.sock --adapter-socket 127.0.0.1:9011
@@ -45,6 +45,7 @@ Mock 模式（CI / 本地可复现测试）：
 
 - `--socket <PATH>`：监听 Unix Socket；省略则走 stdin/stdout
 - `--isabelle-path <PATH>`：Isabelle 可执行路径，默认 `isabelle`
+- `--logic <NAME>`：`process_theories` 使用的 logic image，默认 `HOL`
 - `--adapter-socket <HOST:PORT>`：连接外部已运行适配器（TCP）
 - `--adapter-command <CMD>`：使用自定义命令启动适配器进程（经 `bash -lc` 执行）
 - `--debounce-ms <N>`：`document.push` 防抖窗口，默认 `300`
@@ -52,8 +53,7 @@ Mock 模式（CI / 本地可复现测试）：
 - `--mock`：使用内置 mock adapter
 - `--debug`：启用 debug 日志并写入滚动日志文件
 
-未设置 `--adapter-socket` 与 `--adapter-command` 时，bridge 会尝试在本地仓库中定位
-`scala-adapter/build.sbt` 并通过 `sbt -batch "run --isabelle-path=..."` 启动适配器。
+未设置 `--adapter-socket` 与 `--adapter-command` 时，bridge 会自动拉起内置 Rust real adapter。
 
 ### 协议示例（精确）
 
@@ -97,12 +97,12 @@ make spawn-e2e-ndjson
 
 ## English
 
-`bridge` is a Rust NDJSON router between an editor client and an Isabelle Scala adapter process.
+`bridge` is a Rust NDJSON router between an editor client and an Isabelle adapter backend.
 
 ### Path convention
 
 Commands in this document assume you are in `bridge/`.
-If you run from repository root (`<repo-root>`), add `--manifest-path bridge/Cargo.toml`.
+If you run from repository root (`<repo-root>`), use `-p isabelle-bridge`.
 
 ### Build
 
@@ -130,7 +130,7 @@ Mock mode (CI / deterministic local testing):
 ./target/release/bridge --mock --socket /tmp/isabelle.sock
 ```
 
-External Scala adapter socket mode:
+External adapter socket mode:
 
 ```bash
 ./target/release/bridge --socket /tmp/isabelle.sock --adapter-socket 127.0.0.1:9011
@@ -140,6 +140,7 @@ External Scala adapter socket mode:
 
 - `--socket <PATH>`: listen on a Unix socket; if omitted uses stdin/stdout
 - `--isabelle-path <PATH>`: Isabelle executable path (default `isabelle`)
+- `--logic <NAME>`: logic image passed to `process_theories` (default `HOL`)
 - `--adapter-socket <HOST:PORT>`: connect to external running adapter over TCP
 - `--adapter-command <CMD>`: start adapter process with a custom command (via `bash -lc`)
 - `--debounce-ms <N>`: debounce window for `document.push` (default `300`)
@@ -147,9 +148,7 @@ External Scala adapter socket mode:
 - `--mock`: use built-in mock adapter
 - `--debug`: enable debug logging and rotating debug file output
 
-If `--adapter-socket` and `--adapter-command` are both omitted, bridge tries to
-locate `scala-adapter/build.sbt` in the local repository and launches:
-`sbt -batch "run --isabelle-path=..."`.
+If `--adapter-socket` and `--adapter-command` are both omitted, bridge starts its built-in Rust real adapter.
 
 ### Protocol examples (exact)
 

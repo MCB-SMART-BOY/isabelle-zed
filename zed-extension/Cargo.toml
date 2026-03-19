@@ -4,14 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "Zed extension wiring for Isabelle LSP bridge"
 
-[workspace]
-
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-zed_extension_api = "0.7.0"
-
-[profile.release]
-opt-level = 3
-lto = true
+zed_extension_api.workspace = true

@@ -1,25 +1,28 @@
 use crate::protocol::{
-    Message, MessageType, Position, diagnostics_message_from_request, markup_message_from_request,
-    parse_message, to_ndjson,
+    Diagnostic, Message, MessageType, Position, Range, Severity, diagnostics_message_from_request,
+    markup_message_from_request, parse_message, to_ndjson,
 };
+use regex::Regex;
 use serde::Deserialize;
-use std::path::Path;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
+use tempfile::tempdir;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener as TokioTcpListener;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+use url::Url;
 
 #[derive(Debug, Clone)]
 enum AdapterMode {
     SpawnReal {
         isabelle_path: String,
+        logic: String,
         adapter_command: Option<String>,
     },
     MockSubprocess,
@@ -66,6 +69,7 @@ pub struct ProcessManager {
 impl ProcessManager {
     pub fn new(
         isabelle_path: String,
+        logic: String,
         mock_mode: bool,
         adapter_socket: Option<String>,
         adapter_command: Option<String>,
@@ -86,6 +90,7 @@ impl ProcessManager {
         } else {
             AdapterMode::SpawnReal {
                 isabelle_path,
+                logic,
                 adapter_command,
             }
         };
@@ -115,6 +120,7 @@ impl ProcessManager {
         match self.mode.clone() {
             AdapterMode::SpawnReal {
                 isabelle_path,
+                logic,
                 adapter_command,
             } => match adapter_command {
                 Some(command_line) => {
@@ -122,7 +128,10 @@ impl ProcessManager {
                     command.arg("-lc").arg(command_line);
                     self.start_spawn(command).await
                 }
-                None => self.start_default_real_adapter(&isabelle_path).await,
+                None => {
+                    self.start_default_real_adapter(&isabelle_path, &logic)
+                        .await
+                }
             },
             AdapterMode::MockSubprocess => {
                 let current_exe: PathBuf =
@@ -207,113 +216,17 @@ impl ProcessManager {
     async fn start_default_real_adapter(
         &mut self,
         isabelle_path: &str,
+        logic: &str,
     ) -> Result<(), ProcessError> {
-        let adapter_dir = Self::locate_scala_adapter_dir().ok_or_else(|| {
-            ProcessError::Spawn(
-                "real adapter mode requires --adapter-command, --adapter-socket, or a local scala-adapter directory"
-                    .to_string(),
-            )
-        })?;
-
-        let listener = TokioTcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|err| ProcessError::Connect(err.to_string()))?;
-        let address = listener
-            .local_addr()
-            .map_err(|err| ProcessError::Connect(err.to_string()))?;
-        drop(listener);
-
-        let socket_address = format!("{}:{}", address.ip(), address.port());
-        let mut command = Command::new("sbt");
-        command.current_dir(adapter_dir);
-        command.arg("-batch");
-        command.arg(format!(
-            "run --isabelle-path={isabelle_path} --socket={socket_address}"
-        ));
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        info!(
-            "starting adapter process (socket mode): {:?}, socket {}",
-            command, socket_address
-        );
-        let mut child = command
-            .spawn()
-            .map_err(|err| ProcessError::Spawn(err.to_string()))?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ProcessError::Spawn("failed to acquire child stdout".to_string()))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ProcessError::Spawn("failed to acquire child stderr".to_string()))?;
-
-        self.spawn_stdout_log_reader(stdout);
-        self.spawn_stderr_reader(stderr);
-
-        let mut last_connect_error: Option<std::io::Error> = None;
-        let startup_timeout = Duration::from_secs(45);
-        let startup_start = tokio::time::Instant::now();
-        loop {
-            if startup_start.elapsed() > startup_timeout {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let detail = last_connect_error
-                    .map(|err| err.to_string())
-                    .unwrap_or_else(|| "adapter socket was not ready".to_string());
-                return Err(ProcessError::Connect(format!(
-                    "adapter socket {} not ready within {:?}: {}",
-                    socket_address, startup_timeout, detail
-                )));
-            }
-
-            match TcpStream::connect(&socket_address).await {
-                Ok(stream) => {
-                    let (reader, writer) = stream.into_split();
-                    self.writer = Some(AdapterWriter::Socket(writer));
-                    self.child = Some(child);
-                    self.spawn_socket_output_reader(reader);
-                    return Ok(());
-                }
-                Err(err) => {
-                    if let Some(status) = child.try_wait()? {
-                        return Err(ProcessError::ProcessExited(status.to_string()));
-                    }
-                    last_connect_error = Some(err);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-        }
-    }
-
-    fn locate_scala_adapter_dir() -> Option<PathBuf> {
-        if let Ok(current_dir) = std::env::current_dir()
-            && let Some(path) = Self::find_scala_adapter_from_base(&current_dir)
-        {
-            return Some(path);
-        }
-
-        if let Ok(current_exe) = std::env::current_exe()
-            && let Some(path) = Self::find_scala_adapter_from_base(&current_exe)
-        {
-            return Some(path);
-        }
-
-        None
-    }
-
-    fn find_scala_adapter_from_base(base: &Path) -> Option<PathBuf> {
-        for parent in base.ancestors() {
-            let candidate = parent.join("scala-adapter");
-            if candidate.join("build.sbt").is_file() {
-                return Some(candidate);
-            }
-        }
-        None
+        let current_exe: PathBuf =
+            std::env::current_exe().map_err(|err| ProcessError::Spawn(err.to_string()))?;
+        let mut command = Command::new(current_exe);
+        command.arg("--real-adapter");
+        command.arg("--isabelle-path");
+        command.arg(isabelle_path);
+        command.arg("--logic");
+        command.arg(logic);
+        self.start_spawn(command).await
     }
 
     async fn start_socket(&mut self, address: &str) -> Result<(), ProcessError> {
@@ -339,24 +252,6 @@ impl ProcessManager {
                         if output_tx.send(line).await.is_err() {
                             break;
                         }
-                    }
-                    Ok(None) => break,
-                    Err(err) => {
-                        error!("adapter stdout read error: {err}");
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    fn spawn_stdout_log_reader(&self, stdout: tokio::process::ChildStdout) {
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        debug!("adapter stdout: {line}");
                     }
                     Ok(None) => break,
                     Err(err) => {
@@ -523,4 +418,372 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
     }
 
     Ok(())
+}
+
+struct RealAdapterState {
+    isabelle_path: String,
+    logic: String,
+    latest_documents: HashMap<String, (String, i64)>,
+}
+
+impl RealAdapterState {
+    fn new(isabelle_path: String, logic: String) -> Self {
+        Self {
+            isabelle_path,
+            logic,
+            latest_documents: HashMap::new(),
+        }
+    }
+
+    async fn update_document(&mut self, uri: &str, text: String, version: i64) -> Vec<Diagnostic> {
+        self.latest_documents
+            .insert(uri.to_string(), (text.clone(), version));
+        self.run_isabelle_check(uri, &text).await
+    }
+
+    async fn check_document(&self, uri: &str) -> Vec<Diagnostic> {
+        let text = if let Some((text, _)) = self.latest_documents.get(uri) {
+            Some(text.clone())
+        } else {
+            read_document_from_uri(uri).await
+        };
+
+        let Some(text) = text else {
+            return vec![Diagnostic {
+                uri: uri.to_string(),
+                range: Range {
+                    start: Position { line: 1, col: 1 },
+                    end: Position { line: 1, col: 2 },
+                },
+                severity: Severity::Warning,
+                message: "No theory text available for check".to_string(),
+            }];
+        };
+
+        if text.trim().is_empty() {
+            return vec![Diagnostic {
+                uri: uri.to_string(),
+                range: Range {
+                    start: Position { line: 1, col: 1 },
+                    end: Position { line: 1, col: 2 },
+                },
+                severity: Severity::Warning,
+                message: "No theory text available for check".to_string(),
+            }];
+        }
+
+        self.run_isabelle_check(uri, &text).await
+    }
+
+    async fn run_isabelle_check(&self, uri: &str, text: &str) -> Vec<Diagnostic> {
+        let theory_name = resolve_theory_name(uri, text);
+        let temp_dir = match tempdir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                return vec![Diagnostic {
+                    uri: uri.to_string(),
+                    range: Range {
+                        start: Position { line: 1, col: 1 },
+                        end: Position { line: 1, col: 2 },
+                    },
+                    severity: Severity::Error,
+                    message: format!("Failed to create temp dir: {err}"),
+                }];
+            }
+        };
+        let theory_path = temp_dir.path().join(format!("{theory_name}.thy"));
+
+        if let Err(err) = std::fs::write(&theory_path, text) {
+            return vec![Diagnostic {
+                uri: uri.to_string(),
+                range: Range {
+                    start: Position { line: 1, col: 1 },
+                    end: Position { line: 1, col: 2 },
+                },
+                severity: Severity::Error,
+                message: format!("Failed to write theory file: {err}"),
+            }];
+        }
+
+        let output = Command::new(&self.isabelle_path)
+            .arg("process_theories")
+            .arg("-l")
+            .arg(&self.logic)
+            .arg("-D")
+            .arg(temp_dir.path())
+            .arg("-O")
+            .arg(&theory_name)
+            .output()
+            .await;
+
+        match output {
+            Ok(result) => {
+                let mut combined = String::new();
+                combined.push_str(&String::from_utf8_lossy(&result.stdout));
+                if !combined.ends_with('\n') {
+                    combined.push('\n');
+                }
+                combined.push_str(&String::from_utf8_lossy(&result.stderr));
+                let exit_code = result.status.code().unwrap_or(1);
+                parse_process_theories_diagnostics(uri, &combined, exit_code)
+            }
+            Err(err) => vec![Diagnostic {
+                uri: uri.to_string(),
+                range: Range {
+                    start: Position { line: 1, col: 1 },
+                    end: Position { line: 1, col: 2 },
+                },
+                severity: Severity::Error,
+                message: format!("Failed to run isabelle process_theories: {err}"),
+            }],
+        }
+    }
+}
+
+pub async fn run_real_adapter(isabelle_path: String, logic: String) -> Result<(), ProcessError> {
+    let stdin = tokio::io::stdin();
+    let stdout = tokio::io::stdout();
+
+    let mut input = BufReader::new(stdin).lines();
+    let mut output = tokio::io::BufWriter::new(stdout);
+    let mut state = RealAdapterState::new(isabelle_path, logic);
+
+    while let Some(line) = input.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let request = match parse_message(&line) {
+            Ok(message) => message,
+            Err(err) => {
+                warn!("real adapter received invalid JSON: {err}");
+                continue;
+            }
+        };
+
+        let response = match request.msg_type {
+            MessageType::DocumentPush => {
+                let payload = match request.push_payload() {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        warn!("real adapter invalid document.push payload: {err}");
+                        continue;
+                    }
+                };
+                let diagnostics = state
+                    .update_document(&payload.uri, payload.text, request.version)
+                    .await;
+                diagnostics_response_from_request(&request, diagnostics)?
+            }
+            MessageType::DocumentCheck => {
+                let payload = match request.check_payload() {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        warn!("real adapter invalid document.check payload: {err}");
+                        continue;
+                    }
+                };
+                let diagnostics = state.check_document(&payload.uri).await;
+                diagnostics_response_from_request(&request, diagnostics)?
+            }
+            MessageType::Markup => {
+                let payload: MarkupRequest = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let info = format!(
+                    "Hover from process_theories backend is not available yet ({}:{})",
+                    payload.offset.line, payload.offset.col
+                );
+                markup_message_from_request(&request, &payload.uri, payload.offset, &info)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::Diagnostics => {
+                continue;
+            }
+        };
+
+        let line = to_ndjson(&response).map_err(|err| ProcessError::Protocol(err.to_string()))?;
+        debug!("real adapter -> bridge: {}", line.trim_end());
+        output.write_all(line.as_bytes()).await?;
+        output.flush().await?;
+    }
+
+    Ok(())
+}
+
+fn diagnostics_response_from_request(
+    request: &Message,
+    diagnostics: Vec<Diagnostic>,
+) -> Result<Message, ProcessError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::Diagnostics,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(diagnostics)
+            .map_err(|err| ProcessError::Protocol(err.to_string()))?,
+    })
+}
+
+fn parse_process_theories_diagnostics(uri: &str, output: &str, exit_code: i32) -> Vec<Diagnostic> {
+    if exit_code == 0 {
+        return Vec::new();
+    }
+
+    let error_line_regex =
+        Regex::new(r#"^\*\*\* .* \(line ([0-9]+) of "([^"]+)"\):\s*(.*)$"#).expect("valid regex");
+    let mut parsed = Vec::new();
+
+    for line in output.lines() {
+        let Some(captures) = error_line_regex.captures(line) else {
+            continue;
+        };
+
+        let line_number = captures
+            .get(1)
+            .and_then(|raw| raw.as_str().parse::<i64>().ok())
+            .unwrap_or(1)
+            .max(1);
+        let file_path = captures
+            .get(2)
+            .map(|value| value.as_str())
+            .unwrap_or_default();
+        let message = captures
+            .get(3)
+            .map(|value| value.as_str().trim().to_string())
+            .unwrap_or_else(|| "Isabelle check failed".to_string());
+
+        let diagnostic_uri = path_to_uri(file_path).unwrap_or_else(|| uri.to_string());
+        parsed.push(Diagnostic {
+            uri: diagnostic_uri,
+            range: Range {
+                start: Position {
+                    line: line_number,
+                    col: 1,
+                },
+                end: Position {
+                    line: line_number,
+                    col: 2,
+                },
+            },
+            severity: Severity::Error,
+            message,
+        });
+    }
+
+    if !parsed.is_empty() {
+        return parsed;
+    }
+
+    let fallback_message = output
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("*** ")
+                .map(|value| value.trim().to_string())
+        })
+        .unwrap_or_else(|| format!("Isabelle check failed (exit code {exit_code})"));
+
+    vec![Diagnostic {
+        uri: uri.to_string(),
+        range: Range {
+            start: Position { line: 1, col: 1 },
+            end: Position { line: 1, col: 2 },
+        },
+        severity: Severity::Error,
+        message: fallback_message,
+    }]
+}
+
+fn path_to_uri(path: &str) -> Option<String> {
+    Url::from_file_path(path).ok().map(|uri| uri.to_string())
+}
+
+fn resolve_theory_name(uri: &str, text: &str) -> String {
+    if let Some(extracted) = extract_theory_name(text) {
+        let sanitized = sanitize_theory_name(&extracted);
+        if !sanitized.is_empty() {
+            return sanitized;
+        }
+    }
+
+    if let Some(from_uri) = theory_name_from_uri(uri) {
+        let sanitized = sanitize_theory_name(&from_uri);
+        if !sanitized.is_empty() {
+            return sanitized;
+        }
+    }
+
+    "Scratch".to_string()
+}
+
+fn extract_theory_name(text: &str) -> Option<String> {
+    let theory_regex = Regex::new(r"(?m)^\s*theory\s+([A-Za-z0-9_'.-]+)\b").expect("valid regex");
+    theory_regex
+        .captures(text)
+        .and_then(|captures| captures.get(1).map(|value| value.as_str().to_string()))
+}
+
+fn theory_name_from_uri(uri: &str) -> Option<String> {
+    let parsed = Url::parse(uri).ok()?;
+    if parsed.scheme() != "file" {
+        return None;
+    }
+
+    let path = parsed.to_file_path().ok()?;
+    let file_name = path.file_name()?.to_str()?;
+    file_name
+        .strip_suffix(".thy")
+        .map(std::string::ToString::to_string)
+}
+
+fn sanitize_theory_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '\'' | '.' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+async fn read_document_from_uri(uri: &str) -> Option<String> {
+    let parsed = Url::parse(uri).ok()?;
+    if parsed.scheme() != "file" {
+        return None;
+    }
+    let path = parsed.to_file_path().ok()?;
+    tokio::fs::read_to_string(path).await.ok()
+}
+
+#[cfg(test)]
+mod real_adapter_tests {
+    use super::*;
+
+    #[test]
+    fn process_theories_parser_extracts_line_diagnostics() {
+        let output = r#"Running Draft ...
+Draft FAILED (see also "isabelle build_log -H Error Draft")
+*** Outer syntax error (line 5 of "/tmp/Broken.thy"): proposition expected,
+*** but end-of-input (line 5 of "/tmp/Broken.thy") was found
+*** At command "<malformed>" (line 5 of "/tmp/Broken.thy")
+Unfinished session(s): Draft
+"#;
+
+        let diagnostics = parse_process_theories_diagnostics("file:///tmp/Broken.thy", output, 1);
+
+        assert!(!diagnostics.is_empty());
+        assert_eq!(diagnostics[0].uri, "file:///tmp/Broken.thy");
+        assert_eq!(diagnostics[0].range.start.line, 5);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn resolve_theory_name_prefers_theory_header() {
+        let name = resolve_theory_name(
+            "file:///tmp/Fallback.thy",
+            "theory Demo imports Main begin\nend\n",
+        );
+        assert_eq!(name, "Demo");
+    }
 }

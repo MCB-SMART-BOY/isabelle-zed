@@ -1,4 +1,4 @@
-use bridge::process::{ProcessError, ProcessManager, run_mock_adapter};
+use bridge::process::{ProcessError, ProcessManager, run_mock_adapter, run_real_adapter};
 use bridge::protocol::{MessageType, parse_message};
 use bridge::queue::{DebounceQueue, QueueError};
 use clap::Parser;
@@ -17,13 +17,16 @@ use tracing_subscriber::prelude::*;
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "bridge")]
-#[command(about = "NDJSON bridge between an editor and Isabelle Scala adapter")]
+#[command(about = "NDJSON bridge between an editor client and Isabelle adapter backend")]
 struct Args {
     #[arg(long)]
     socket: Option<PathBuf>,
 
     #[arg(long, default_value = "isabelle")]
     isabelle_path: String,
+
+    #[arg(long, default_value = "HOL")]
+    logic: String,
 
     #[arg(long)]
     adapter_socket: Option<String>,
@@ -45,11 +48,15 @@ struct Args {
 
     #[arg(long, hide = true)]
     mock_adapter: bool,
+
+    #[arg(long, hide = true)]
+    real_adapter: bool,
 }
 
 #[derive(Debug, Clone)]
 struct SessionConfig {
     isabelle_path: String,
+    logic: String,
     adapter_socket: Option<String>,
     adapter_command: Option<String>,
     debounce_ms: u64,
@@ -73,10 +80,16 @@ async fn main() -> Result<(), BridgeError> {
     if args.mock_adapter {
         return run_mock_adapter().await.map_err(BridgeError::from);
     }
+    if args.real_adapter {
+        return run_real_adapter(args.isabelle_path, args.logic)
+            .await
+            .map_err(BridgeError::from);
+    }
 
     let _log_guard = setup_logging(args.debug, args.log_dir.as_ref())?;
     let session = SessionConfig {
         isabelle_path: args.isabelle_path,
+        logic: args.logic,
         adapter_socket: args.adapter_socket,
         adapter_command: args.adapter_command,
         debounce_ms: args.debounce_ms,
@@ -186,6 +199,7 @@ where
 {
     let mut process = ProcessManager::new(
         session.isabelle_path,
+        session.logic,
         session.mock,
         session.adapter_socket,
         session.adapter_command,

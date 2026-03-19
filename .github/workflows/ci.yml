@@ -17,15 +17,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Format check
-        run: |
-          echo "If this fails locally, run: cargo fmt --manifest-path bridge/Cargo.toml"
-          cargo fmt --manifest-path bridge/Cargo.toml -- --check
+        run: cargo fmt -p isabelle-bridge -- --check
 
       - name: Clippy
-        run: cargo clippy --manifest-path bridge/Cargo.toml -- -D warnings
+        run: cargo clippy -p isabelle-bridge -- -D warnings
 
       - name: Test
-        run: cargo test --manifest-path bridge/Cargo.toml
+        run: cargo test -p isabelle-bridge
 
   isabelle-lsp:
     name: Isabelle LSP (Rust)
@@ -37,34 +35,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Format check
-        run: |
-          echo "If this fails locally, run: cargo fmt --manifest-path isabelle-lsp/Cargo.toml"
-          cargo fmt --manifest-path isabelle-lsp/Cargo.toml -- --check
+        run: cargo fmt -p isabelle-zed-lsp -- --check
 
       - name: Clippy
-        run: cargo clippy --manifest-path isabelle-lsp/Cargo.toml -- -D warnings
+        run: cargo clippy -p isabelle-zed-lsp -- -D warnings
 
       - name: Test
-        run: cargo test --manifest-path isabelle-lsp/Cargo.toml
-
-  scala-adapter:
-    name: Scala Adapter
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up sbt
-        uses: sbt/setup-sbt@v1
-
-      - name: Test scala adapter
-        working-directory: scala-adapter
-        run: sbt -batch test
+        run: cargo test -p isabelle-zed-lsp
 
   zed-extension:
     name: Zed Extension
@@ -78,423 +55,47 @@ jobs:
           targets: wasm32-wasip2
 
       - name: Check (host)
-        run: cargo check --manifest-path zed-extension/Cargo.toml
+        run: cargo check -p isabelle-zed-extension
 
       - name: Check (wasm32-wasip2)
-        run: cargo check --manifest-path zed-extension/Cargo.toml --target wasm32-wasip2
+        run: cargo check -p isabelle-zed-extension --target wasm32-wasip2
 
-  mock-e2e-ndjson:
-    name: Mock E2E (Bridge <-> Scala NDJSON)
+  xtask:
+    name: Xtask
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [bridge, scala-adapter, zed-extension]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+      - name: Check
+        run: cargo check -p isabelle-zed-xtask
 
-      - name: Set up sbt
-        uses: sbt/setup-sbt@v1
+  mock-e2e-ndjson:
+    name: Mock E2E (Bridge --adapter-command)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [bridge, xtask]
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Compile scala adapter
-        working-directory: scala-adapter
-        run: sbt -batch compile
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build bridge
-        run: cargo build --manifest-path bridge/Cargo.toml --release
-
-      - name: Start scala adapter mock (background)
-        run: |
-          cd scala-adapter
-          sbt -batch "run --mock --socket=127.0.0.1:9011" > /tmp/scala-adapter.log 2>&1 &
-          echo $! > /tmp/scala_adapter_pid
-
-      - name: Wait for scala adapter socket
-        run: |
-          if ! python3 - <<'PY'
-          import socket
-          import time
-
-          deadline = time.time() + 120
-          while time.time() < deadline:
-              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-              sock.settimeout(0.25)
-              try:
-                  sock.connect(("127.0.0.1", 9011))
-                  sock.close()
-                  raise SystemExit(0)
-              except OSError:
-                  sock.close()
-                  time.sleep(0.1)
-
-          raise SystemExit("scala adapter socket was not reachable in time")
-          PY
-          then
-            echo "scala adapter failed to become ready; recent log output:" >&2
-            tail -n 200 /tmp/scala-adapter.log >&2 || true
-            exit 1
-          fi
-
-      - name: Start bridge (connected to scala adapter socket)
-        run: |
-          ./bridge/target/release/bridge --socket /tmp/isabelle.sock --adapter-socket 127.0.0.1:9011 > /tmp/bridge.log 2>&1 &
-          echo $! > /tmp/bridge_pid
-
-      - name: Wait for bridge socket
-        run: |
-          for i in $(seq 1 80); do
-            if [ -S /tmp/isabelle.sock ]; then
-              exit 0
-            fi
-            sleep 0.1
-          done
-          echo "bridge socket was not created" >&2
-          exit 1
-
-      - name: Assert NDJSON bridge flow
-        run: |
-          python3 - <<'PY'
-          import json
-          import socket
-          import time
-
-          req = {
-              "id": "msg-0001",
-              "type": "document.push",
-              "session": "s1",
-              "version": 1,
-              "payload": {
-                  "uri": "file:///home/user/example.thy",
-                  "text": "theory Example imports Main begin\\nend\\n",
-              },
-          }
-
-          sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-          sock.settimeout(1.0)
-          sock.connect('/tmp/isabelle.sock')
-          sock.sendall((json.dumps(req) + "\n").encode())
-
-          data = b''
-          deadline = time.time() + 30.0
-          while not data.endswith(b"\n"):
-              if time.time() >= deadline:
-                  raise TimeoutError("timed out waiting for bridge response")
-              try:
-                  chunk = sock.recv(4096)
-              except TimeoutError:
-                  continue
-              if not chunk:
-                  break
-              data += chunk
-          sock.close()
-
-          if not data:
-              raise SystemExit('no response from bridge')
-
-          msg = json.loads(data.decode().strip())
-          assert msg["type"] == "diagnostics", msg
-          assert msg["id"] == "msg-0001", msg
-          assert msg["session"] == "s1", msg
-          assert msg["version"] == 1, msg
-
-          payload = msg["payload"]
-          assert isinstance(payload, list) and len(payload) == 1, payload
-          diag = payload[0]
-          assert diag["uri"] == "file:///home/user/example.thy", diag
-          assert diag["range"]["start"] == {"line": 1, "col": 1}, diag
-          assert diag["range"]["end"] == {"line": 1, "col": 7}, diag
-          assert diag["severity"] == "error", diag
-          assert diag["message"] == "Parse error", diag
-          PY
-
-      - name: Cleanup
-        if: always()
-        run: |
-          if [ -f /tmp/bridge_pid ]; then
-            kill "$(cat /tmp/bridge_pid)" 2>/dev/null || true
-          fi
-          if [ -f /tmp/scala_adapter_pid ]; then
-            kill "$(cat /tmp/scala_adapter_pid)" 2>/dev/null || true
-          fi
-          rm -f /tmp/isabelle.sock
-          tail -n +1 /tmp/bridge.log 2>/dev/null || true
-          tail -n +1 /tmp/scala-adapter.log 2>/dev/null || true
+      - name: Run NDJSON E2E
+        run: cargo run -p isabelle-zed-xtask -- spawn-e2e-ndjson
 
   mock-e2e-lsp:
     name: Mock E2E (LSP -> Bridge)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [bridge, isabelle-lsp, zed-extension]
+    needs: [bridge, isabelle-lsp, xtask]
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build bridge
-        run: cargo build --manifest-path bridge/Cargo.toml --release
-
-      - name: Build LSP proxy
-        run: cargo build --manifest-path isabelle-lsp/Cargo.toml --release
-
-      - name: Start bridge mock
-        run: |
-          ./bridge/target/release/bridge --mock --socket /tmp/isabelle.sock > /tmp/bridge.log 2>&1 &
-          echo $! > /tmp/bridge_pid
-
-      - name: Wait for bridge socket
-        run: |
-          for i in $(seq 1 80); do
-            if [ -S /tmp/isabelle.sock ]; then
-              exit 0
-            fi
-            sleep 0.1
-          done
-          echo "bridge socket was not created" >&2
-          exit 1
-
-      - name: Assert LSP diagnostics flow
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import select
-          import subprocess
-          import time
-
-          def send_message(stdin, message):
-              body = json.dumps(message).encode("utf-8")
-              header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
-              stdin.write(header)
-              stdin.write(body)
-              stdin.flush()
-
-          def read_exact(stdout, size, timeout):
-              chunks = bytearray()
-              deadline = time.time() + timeout
-              while len(chunks) < size:
-                  remaining = max(0.0, deadline - time.time())
-                  if remaining <= 0:
-                      raise TimeoutError("timed out waiting for LSP body bytes")
-                  ready, _, _ = select.select([stdout], [], [], remaining)
-                  if not ready:
-                      raise TimeoutError("timed out waiting for LSP body bytes")
-                  chunk = os.read(stdout.fileno(), size - len(chunks))
-                  if not chunk:
-                      raise RuntimeError("LSP server exited early")
-                  chunks.extend(chunk)
-              return bytes(chunks)
-
-          def read_message(stdout, timeout=5.0):
-              deadline = time.time() + timeout
-              header = bytearray()
-              while b"\r\n\r\n" not in header:
-                  remaining = max(0.0, deadline - time.time())
-                  if remaining <= 0:
-                      raise TimeoutError("timed out waiting for LSP headers")
-                  ready, _, _ = select.select([stdout], [], [], remaining)
-                  if not ready:
-                      raise TimeoutError("timed out waiting for LSP headers")
-                  chunk = os.read(stdout.fileno(), 1)
-                  if not chunk:
-                      raise RuntimeError("LSP server exited early")
-                  header.extend(chunk)
-
-              headers = bytes(header).decode("utf-8").split("\r\n")
-              content_length = None
-              for line in headers:
-                  if line.lower().startswith("content-length:"):
-                      content_length = int(line.split(":", 1)[1].strip())
-                      break
-
-              if content_length is None:
-                  raise RuntimeError(f"missing content-length header: {headers}")
-
-              body = read_exact(stdout, content_length, timeout)
-
-              return json.loads(body.decode("utf-8"))
-
-          env = os.environ.copy()
-          env["ISABELLE_BRIDGE_SOCKET"] = "/tmp/isabelle.sock"
-
-          proc = subprocess.Popen(
-              ["./isabelle-lsp/target/release/isabelle-zed-lsp"],
-              stdin=subprocess.PIPE,
-              stdout=subprocess.PIPE,
-              stderr=subprocess.PIPE,
-              env=env,
-          )
-
-          try:
-              send_message(proc.stdin, {
-                  "jsonrpc": "2.0",
-                  "id": 1,
-                  "method": "initialize",
-                  "params": {
-                      "processId": None,
-                      "rootUri": None,
-                      "capabilities": {},
-                  },
-              })
-
-              init = read_message(proc.stdout)
-              assert init.get("id") == 1, init
-
-              send_message(proc.stdin, {
-                  "jsonrpc": "2.0",
-                  "method": "initialized",
-                  "params": {},
-              })
-
-              send_message(proc.stdin, {
-                  "jsonrpc": "2.0",
-                  "method": "textDocument/didOpen",
-                  "params": {
-                      "textDocument": {
-                          "uri": "file:///home/user/example.thy",
-                          "languageId": "isabelle",
-                          "version": 1,
-                          "text": "theory Example imports Main begin\\nend\\n",
-                      }
-                  },
-              })
-
-              diagnostics = None
-              deadline = time.time() + 8.0
-              while time.time() < deadline:
-                  message = read_message(proc.stdout, timeout=8.0)
-                  if message.get("method") == "textDocument/publishDiagnostics":
-                      diagnostics = message
-                      break
-
-              if diagnostics is None:
-                  raise RuntimeError("did not receive publishDiagnostics")
-
-              params = diagnostics["params"]
-              assert params["uri"] == "file:///home/user/example.thy", diagnostics
-              assert len(params["diagnostics"]) == 1, diagnostics
-              assert params["diagnostics"][0]["message"] == "Parse error", diagnostics
-
-              send_message(proc.stdin, {
-                  "jsonrpc": "2.0",
-                  "id": 2,
-                  "method": "shutdown",
-                  "params": None,
-              })
-              _ = read_message(proc.stdout)
-
-              send_message(proc.stdin, {
-                  "jsonrpc": "2.0",
-                  "method": "exit",
-                  "params": None,
-              })
-          finally:
-              proc.terminate()
-              try:
-                  proc.wait(timeout=2)
-              except subprocess.TimeoutExpired:
-                  proc.kill()
-                  proc.wait(timeout=2)
-          PY
-
-      - name: Cleanup
-        if: always()
-        run: |
-          if [ -f /tmp/bridge_pid ]; then
-            kill "$(cat /tmp/bridge_pid)" 2>/dev/null || true
-          fi
-          rm -f /tmp/isabelle.sock
-          tail -n +1 /tmp/bridge.log 2>/dev/null || true
-
-  spawn-e2e-ndjson:
-    name: Spawn E2E (Bridge --adapter-command)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [bridge]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build bridge
-        run: cargo build --manifest-path bridge/Cargo.toml --release
-
-      - name: Start bridge with adapter command (background)
-        run: |
-          ./bridge/target/release/bridge --socket /tmp/isabelle.sock --adapter-command "./bridge/target/release/bridge --mock-adapter" > /tmp/bridge.log 2>&1 &
-          echo $! > /tmp/bridge_pid
-
-      - name: Wait for bridge socket
-        run: |
-          for i in $(seq 1 80); do
-            if [ -S /tmp/isabelle.sock ]; then
-              exit 0
-            fi
-            sleep 0.1
-          done
-          echo "bridge socket was not created" >&2
-          exit 1
-
-      - name: Assert NDJSON flow through adapter-command mode
-        run: |
-          python3 - <<'PY'
-          import json
-          import socket
-          import time
-
-          req = {
-              "id": "msg-0001",
-              "type": "document.push",
-              "session": "s1",
-              "version": 1,
-              "payload": {
-                  "uri": "file:///home/user/example.thy",
-                  "text": "theory Example imports Main begin\\nend\\n",
-              },
-          }
-
-          sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-          sock.settimeout(1.0)
-          sock.connect('/tmp/isabelle.sock')
-          sock.sendall((json.dumps(req) + "\n").encode())
-
-          data = b''
-          deadline = time.time() + 30.0
-          while not data.endswith(b"\n"):
-              if time.time() >= deadline:
-                  raise TimeoutError("timed out waiting for bridge response")
-              try:
-                  chunk = sock.recv(4096)
-              except TimeoutError:
-                  continue
-              if not chunk:
-                  break
-              data += chunk
-          sock.close()
-
-          if not data:
-              raise SystemExit('no response from bridge')
-
-          msg = json.loads(data.decode().strip())
-          assert msg["type"] == "diagnostics", msg
-          payload = msg["payload"]
-          assert isinstance(payload, list) and len(payload) == 1, payload
-          assert payload[0]["message"] == "Parse error", payload[0]
-          PY
-
-      - name: Cleanup
-        if: always()
-        run: |
-          if [ -f /tmp/bridge_pid ]; then
-            kill "$(cat /tmp/bridge_pid)" 2>/dev/null || true
-          fi
-          rm -f /tmp/isabelle.sock
-          tail -n +1 /tmp/bridge.log 2>/dev/null || true
+      - name: Run LSP E2E
+        run: cargo run -p isabelle-zed-xtask -- mock-lsp-e2e

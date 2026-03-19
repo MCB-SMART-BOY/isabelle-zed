@@ -3,8 +3,6 @@ name = "isabelle-bridge"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-
 [lib]
 name = "bridge"
 path = "src/lib.rs"
@@ -14,19 +12,14 @@ name = "bridge"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "=4.5.18", features = ["derive"] }
-serde = { version = "=1.0.210", features = ["derive"] }
-serde_json = "=1.0.128"
-thiserror = "=1.0.64"
-tokio = { version = "=1.40.0", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tracing = "=0.1.40"
-tracing-appender = "=0.2.3"
-tracing-subscriber = { version = "=0.3.18", features = ["env-filter"] }
-
-[dev-dependencies]
-tempfile = "=3.12.0"
-tokio = { version = "=1.40.0", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "time"] }
-
-[profile.release]
-opt-level = 3
-lto = true
+clap.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true

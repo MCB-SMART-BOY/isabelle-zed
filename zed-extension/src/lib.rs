@@ -586,7 +586,9 @@ mod tests {
             Some(("Foo".to_string(), Some("HOL".to_string())))
         );
         assert_eq!(
-            parse_session_from_line("session \"Foo Bar\" in \"dir with space\" = \"HOL\" # comment"),
+            parse_session_from_line(
+                "session \"Foo Bar\" in \"dir with space\" = \"HOL\" # comment"
+            ),
             Some(("Foo Bar".to_string(), Some("HOL".to_string())))
         );
         assert_eq!(
