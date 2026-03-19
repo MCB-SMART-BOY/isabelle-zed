@@ -28,6 +28,7 @@ All notable changes to this project are documented in this file.
 - bridge real-adapter now caches diagnostics by in-memory document content/version, avoiding redundant `process_theories` runs for unchanged text.
 - added `cargo run -p isabelle-zed-xtask -- bridge-real-smoke` for local real-adapter smoke validation against malformed theory input.
 - bridge now supports `--tcp <host:port>` listener mode in addition to Unix `--socket`.
+- added cross-platform `cargo run -p isabelle-zed-xtask -- mock-lsp-e2e-tcp` and wired it into CI (Linux + Windows) to validate endpoint transport path.
 
 ### Removed
 

@@ -102,6 +102,7 @@ cargo test
 仓库根目录也提供了真实启动链路的本地回归命令：
 
 ```bash
+cargo run -p isabelle-zed-xtask -- mock-lsp-e2e-tcp
 cargo run -p isabelle-zed-xtask -- bridge-real-smoke
 cargo run -p isabelle-zed-xtask -- spawn-e2e-ndjson
 ```
@@ -208,6 +209,7 @@ cargo test
 From repository root, a local real-startup regression is also available:
 
 ```bash
+cargo run -p isabelle-zed-xtask -- mock-lsp-e2e-tcp
 cargo run -p isabelle-zed-xtask -- bridge-real-smoke
 cargo run -p isabelle-zed-xtask -- spawn-e2e-ndjson
 ```

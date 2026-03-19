@@ -57,3 +57,31 @@ jobs:
 
       - name: Run LSP E2E
         run: cargo run -p isabelle-zed-xtask -- mock-lsp-e2e
+
+  mock-e2e-lsp-tcp-linux:
+    name: Mock E2E (LSP -> Bridge TCP, Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [quality]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run LSP TCP E2E
+        run: cargo run -p isabelle-zed-xtask -- mock-lsp-e2e-tcp
+
+  mock-e2e-lsp-tcp-windows:
+    name: Mock E2E (LSP -> Bridge TCP, Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    needs: [quality]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run LSP TCP E2E
+        run: cargo run -p isabelle-zed-xtask -- mock-lsp-e2e-tcp

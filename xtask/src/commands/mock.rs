@@ -3,6 +3,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
 #[cfg(unix)]
@@ -294,6 +295,31 @@ fn wait_for_socket_ready(socket: &Path, timeout: Duration) -> Result<()> {
     }
 }
 
+fn find_free_tcp_address() -> Result<String> {
+    let listener =
+        TcpListener::bind("127.0.0.1:0").context("failed to reserve a free local tcp port")?;
+    let address = listener
+        .local_addr()
+        .context("failed to read local tcp listener address")?
+        .to_string();
+    drop(listener);
+    Ok(address)
+}
+
+fn wait_for_tcp_ready(address: &str, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(stream) = TcpStream::connect(address) {
+            drop(stream);
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("tcp endpoint was not ready in time: {address}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn kill_child_quietly(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
@@ -456,6 +482,155 @@ pub(crate) fn mock_lsp_e2e(repo_root: &Path) -> Result<()> {
         let _ = fs::remove_file(socket);
         result
     }
+}
+
+pub(crate) fn mock_lsp_e2e_tcp(repo_root: &Path) -> Result<()> {
+    run_command(
+        Command::new("cargo")
+            .arg("build")
+            .arg("-p")
+            .arg("isabelle-bridge"),
+    )?;
+    run_command(
+        Command::new("cargo")
+            .arg("build")
+            .arg("-p")
+            .arg("isabelle-zed-lsp"),
+    )?;
+
+    let tcp_address = find_free_tcp_address()?;
+    let bridge_bin = bridge_binary_path(repo_root, "debug");
+    let mut bridge = Command::new(&bridge_bin)
+        .arg("--mock")
+        .arg("--tcp")
+        .arg(&tcp_address)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to start bridge: {}", bridge_bin.display()))?;
+
+    let result = (|| -> Result<()> {
+        wait_for_tcp_ready(&tcp_address, Duration::from_secs(8))?;
+
+        let lsp_bin = lsp_binary_path(repo_root, "debug");
+        let mut lsp = Command::new(&lsp_bin)
+            .env("ISABELLE_BRIDGE_ENDPOINT", format!("tcp:{tcp_address}"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start lsp: {}", lsp_bin.display()))?;
+
+        let result = (|| -> Result<()> {
+            let mut stdin = lsp
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow!("failed to open lsp stdin"))?;
+            let stdout = lsp
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow!("failed to open lsp stdout"))?;
+            let rx = spawn_lsp_reader(stdout);
+
+            send_lsp_message(
+                &mut stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "processId": Value::Null,
+                        "rootUri": Value::Null,
+                        "capabilities": {}
+                    }
+                }),
+            )?;
+            let _initialize = recv_lsp_until(&rx, Duration::from_secs(8), |msg| {
+                msg.get("id") == Some(&json!(1))
+            })?;
+
+            send_lsp_message(
+                &mut stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialized",
+                    "params": {}
+                }),
+            )?;
+
+            send_lsp_message(
+                &mut stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": "file:///home/user/example.thy",
+                            "languageId": "isabelle",
+                            "version": 1,
+                            "text": "theory Example imports Main begin\\nend\\n"
+                        }
+                    }
+                }),
+            )?;
+
+            let diagnostics = recv_lsp_until(&rx, Duration::from_secs(8), |msg| {
+                msg.get("method") == Some(&json!("textDocument/publishDiagnostics"))
+            })?;
+            let params = diagnostics
+                .get("params")
+                .ok_or_else(|| anyhow!("missing diagnostics params"))?;
+            if params.get("uri") != Some(&json!("file:///home/user/example.thy")) {
+                bail!("unexpected diagnostics uri: {params}");
+            }
+            let diagnostics_arr = params
+                .get("diagnostics")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("missing diagnostics array"))?;
+            if diagnostics_arr.len() != 1 {
+                bail!("expected one diagnostic, got {}", diagnostics_arr.len());
+            }
+            let message = diagnostics_arr[0]
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if message != "Parse error" {
+                bail!("unexpected diagnostic message: {message}");
+            }
+
+            send_lsp_message(
+                &mut stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "shutdown",
+                    "params": Value::Null
+                }),
+            )?;
+            let _shutdown = recv_lsp_until(&rx, Duration::from_secs(8), |msg| {
+                msg.get("id") == Some(&json!(2))
+            })?;
+            send_lsp_message(
+                &mut stdin,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "method": "exit",
+                    "params": Value::Null
+                }),
+            )?;
+
+            Ok(())
+        })();
+
+        kill_child_quietly(&mut lsp);
+        result
+    })();
+
+    kill_child_quietly(&mut bridge);
+    if result.is_ok() {
+        println!("mock-lsp-e2e-tcp: OK");
+    }
+    result
 }
 
 pub(crate) fn native_lsp_smoke() -> Result<()> {
