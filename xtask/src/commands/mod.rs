@@ -23,6 +23,7 @@ pub(crate) fn run(command: Commands, repo_root: &Path) -> Result<()> {
         Commands::BridgeMockDown { socket } => mock::bridge_mock_down(&socket),
         Commands::MockSend { socket } => mock::mock_send(&socket),
         Commands::MockLspE2e => mock::mock_lsp_e2e(repo_root),
+        Commands::BridgeRealSmoke => mock::bridge_real_smoke(repo_root),
         Commands::NativeLspSmoke => mock::native_lsp_smoke(),
         Commands::SpawnE2eNdjson => mock::spawn_e2e_ndjson(repo_root),
     }

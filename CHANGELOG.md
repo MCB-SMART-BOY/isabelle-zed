@@ -25,6 +25,8 @@ All notable changes to this project are documented in this file.
 - bridge real-adapter `markup` now returns syntax-level hover context (identifier/range/line text) instead of a placeholder message.
 - `isabelle-zed-lsp` now converts hover positions from LSP 0-based to bridge 1-based before forwarding.
 - bridge real-adapter now supports repeatable `--session-dir` (mapped to `process_theories -d`) and auto-adds the checked file's parent directory to session lookup paths.
+- bridge real-adapter now caches diagnostics by in-memory document content/version, avoiding redundant `process_theories` runs for unchanged text.
+- added `cargo run -p isabelle-zed-xtask -- bridge-real-smoke` for local real-adapter smoke validation against malformed theory input.
 
 ### Removed
 

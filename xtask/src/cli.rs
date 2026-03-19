@@ -37,6 +37,7 @@ pub(crate) enum Commands {
         socket: PathBuf,
     },
     MockLspE2e,
+    BridgeRealSmoke,
     NativeLspSmoke,
     SpawnE2eNdjson,
 }

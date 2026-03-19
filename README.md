@@ -205,6 +205,7 @@ cargo test -p isabelle-bridge
 cargo test -p isabelle-zed-lsp
 cargo check -p isabelle-zed-extension
 cargo run -p isabelle-zed-xtask -- build-isabelle-grammar
+cargo run -p isabelle-zed-xtask -- bridge-real-smoke
 cargo run -p isabelle-zed-xtask -- native-lsp-smoke
 cargo run -p isabelle-zed-xtask -- spawn-e2e-ndjson
 ```
@@ -420,6 +421,7 @@ cargo test -p isabelle-bridge
 cargo test -p isabelle-zed-lsp
 cargo check -p isabelle-zed-extension
 cargo run -p isabelle-zed-xtask -- build-isabelle-grammar
+cargo run -p isabelle-zed-xtask -- bridge-real-smoke
 cargo run -p isabelle-zed-xtask -- native-lsp-smoke
 cargo run -p isabelle-zed-xtask -- spawn-e2e-ndjson
 ```

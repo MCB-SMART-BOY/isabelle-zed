@@ -1,4 +1,4 @@
-use crate::common::{bridge_binary_path, lsp_binary_path, run_command};
+use crate::common::{bridge_binary_path, command_exists, lsp_binary_path, run_command};
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use std::fs;
@@ -539,6 +539,91 @@ pub(crate) fn native_lsp_smoke() -> Result<()> {
         println!("isabelle vscode_server initialize/shutdown smoke test: OK");
     }
     result
+}
+
+pub(crate) fn bridge_real_smoke(repo_root: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = repo_root;
+        bail!("bridge-real-smoke is only available on unix platforms");
+    }
+    #[cfg(unix)]
+    {
+        if !command_exists("isabelle") {
+            bail!("bridge-real-smoke requires `isabelle` in PATH");
+        }
+
+        run_command(
+            Command::new("cargo")
+                .arg("build")
+                .arg("-p")
+                .arg("isabelle-bridge"),
+        )?;
+
+        let bridge_path = bridge_binary_path(repo_root, "debug");
+        let socket = PathBuf::from("/tmp/isabelle-real-smoke.sock");
+        if socket.exists() {
+            let _ = fs::remove_file(&socket);
+        }
+
+        let mut bridge = Command::new(&bridge_path)
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--logic")
+            .arg("HOL")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start bridge: {}", bridge_path.display()))?;
+
+        let result = (|| -> Result<()> {
+            wait_for_socket_ready(&socket, Duration::from_secs(10))?;
+
+            let mut stream = UnixStream::connect(&socket).with_context(|| {
+                format!("failed to connect bridge socket: {}", socket.display())
+            })?;
+            stream.set_read_timeout(Some(Duration::from_secs(20)))?;
+
+            let req = json!({
+                "id": "msg-0001",
+                "type": "document.push",
+                "session": "s1",
+                "version": 1,
+                "payload": {
+                    "uri": "file:///tmp/BridgeRealSmoke.thy",
+                    "text": "theory BridgeRealSmoke imports Main begin\nlemma broken\nend\n"
+                }
+            });
+            let line = format!("{}\n", serde_json::to_string(&req)?);
+            stream.write_all(line.as_bytes())?;
+
+            let mut reader = BufReader::new(stream);
+            let mut response = String::new();
+            reader.read_line(&mut response)?;
+            if response.trim().is_empty() {
+                bail!("no response from bridge");
+            }
+
+            let message: Value = serde_json::from_str(response.trim())
+                .context("failed to decode bridge response JSON")?;
+            if message.get("type") != Some(&json!("diagnostics")) {
+                bail!("unexpected response type: {message}");
+            }
+            let payload = message
+                .get("payload")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("missing diagnostics payload array: {message}"))?;
+            if payload.is_empty() {
+                bail!("expected diagnostics from malformed theory, got empty payload");
+            }
+            println!("bridge real adapter smoke test: OK");
+            Ok(())
+        })();
+
+        kill_child_quietly(&mut bridge);
+        let _ = fs::remove_file(&socket);
+        result
+    }
 }
 
 #[cfg(unix)]

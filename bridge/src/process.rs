@@ -451,7 +451,14 @@ struct RealAdapterState {
     isabelle_path: String,
     logic: String,
     session_dirs: Vec<PathBuf>,
-    latest_documents: HashMap<String, (String, i64)>,
+    latest_documents: HashMap<String, CachedDocument>,
+}
+
+#[derive(Clone)]
+struct CachedDocument {
+    text: String,
+    version: i64,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl RealAdapterState {
@@ -465,43 +472,56 @@ impl RealAdapterState {
     }
 
     async fn update_document(&mut self, uri: &str, text: String, version: i64) -> Vec<Diagnostic> {
-        self.latest_documents
-            .insert(uri.to_string(), (text.clone(), version));
-        self.run_isabelle_check(uri, &text).await
+        if let Some(cached) = self.latest_documents.get_mut(uri)
+            && cached.text == text
+        {
+            cached.version = version;
+            return cached.diagnostics.clone();
+        }
+
+        let diagnostics = self.run_isabelle_check(uri, &text).await;
+        self.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text,
+                version,
+                diagnostics: diagnostics.clone(),
+            },
+        );
+        diagnostics
     }
 
-    async fn check_document(&self, uri: &str) -> Vec<Diagnostic> {
-        let text = if let Some((text, _)) = self.latest_documents.get(uri) {
-            Some(text.clone())
+    async fn check_document(&mut self, uri: &str, version: i64) -> Vec<Diagnostic> {
+        if let Some(cached) = self.latest_documents.get(uri)
+            && cached.version == version
+        {
+            return cached.diagnostics.clone();
+        }
+
+        let text = if let Some(cached) = self.latest_documents.get(uri) {
+            Some(cached.text.clone())
         } else {
             read_document_from_uri(uri).await
         };
 
         let Some(text) = text else {
-            return vec![Diagnostic {
-                uri: uri.to_string(),
-                range: Range {
-                    start: Position { line: 1, col: 1 },
-                    end: Position { line: 1, col: 2 },
-                },
-                severity: Severity::Warning,
-                message: "No theory text available for check".to_string(),
-            }];
+            return vec![no_theory_text_diagnostic(uri)];
         };
 
         if text.trim().is_empty() {
-            return vec![Diagnostic {
-                uri: uri.to_string(),
-                range: Range {
-                    start: Position { line: 1, col: 1 },
-                    end: Position { line: 1, col: 2 },
-                },
-                severity: Severity::Warning,
-                message: "No theory text available for check".to_string(),
-            }];
+            return vec![no_theory_text_diagnostic(uri)];
         }
 
-        self.run_isabelle_check(uri, &text).await
+        let diagnostics = self.run_isabelle_check(uri, &text).await;
+        self.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text,
+                version,
+                diagnostics: diagnostics.clone(),
+            },
+        );
+        diagnostics
     }
 
     async fn run_isabelle_check(&self, uri: &str, text: &str) -> Vec<Diagnostic> {
@@ -572,8 +592,8 @@ impl RealAdapterState {
     }
 
     async fn hover_markup(&self, uri: &str, offset: Position) -> String {
-        let text = if let Some((text, _)) = self.latest_documents.get(uri) {
-            Some(text.clone())
+        let text = if let Some(cached) = self.latest_documents.get(uri) {
+            Some(cached.text.clone())
         } else {
             read_document_from_uri(uri).await
         };
@@ -602,6 +622,18 @@ impl RealAdapterState {
         }
 
         dirs
+    }
+}
+
+fn no_theory_text_diagnostic(uri: &str) -> Diagnostic {
+    Diagnostic {
+        uri: uri.to_string(),
+        range: Range {
+            start: Position { line: 1, col: 1 },
+            end: Position { line: 1, col: 2 },
+        },
+        severity: Severity::Warning,
+        message: "No theory text available for check".to_string(),
     }
 }
 
@@ -652,7 +684,7 @@ pub async fn run_real_adapter(
                         continue;
                     }
                 };
-                let diagnostics = state.check_document(&payload.uri).await;
+                let diagnostics = state.check_document(&payload.uri, payload.version).await;
                 diagnostics_response_from_request(&request, diagnostics)?
             }
             MessageType::Markup => {
@@ -985,10 +1017,81 @@ Unfinished session(s): Draft
         );
         state.latest_documents.insert(
             "file:///tmp/work/Example.thy".to_string(),
-            ("theory Example imports Main begin\nend\n".to_string(), 1),
+            CachedDocument {
+                text: "theory Example imports Main begin\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
         );
 
         let dirs = state.session_dirs_for_uri("file:///tmp/work/Example.thy");
         assert_eq!(dirs, vec![PathBuf::from("/tmp/work")]);
+    }
+
+    #[tokio::test]
+    async fn update_document_reuses_cached_diagnostics_when_text_is_unchanged() {
+        let uri = "file:///tmp/Example.thy";
+        let text = "theory Example imports Main begin\nlemma x: True by simp\nend\n";
+        let cached = vec![Diagnostic {
+            uri: uri.to_string(),
+            range: Range {
+                start: Position { line: 2, col: 1 },
+                end: Position { line: 2, col: 2 },
+            },
+            severity: Severity::Info,
+            message: "cached".to_string(),
+        }];
+
+        let mut state = RealAdapterState::new(
+            "definitely-not-a-real-isabelle".to_string(),
+            "HOL".to_string(),
+            Vec::new(),
+        );
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: text.to_string(),
+                version: 1,
+                diagnostics: cached.clone(),
+            },
+        );
+
+        let diagnostics = state.update_document(uri, text.to_string(), 2).await;
+        assert_eq!(diagnostics, cached);
+        assert_eq!(
+            state.latest_documents.get(uri).map(|doc| doc.version),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn check_document_reuses_cached_diagnostics_for_matching_version() {
+        let uri = "file:///tmp/Example.thy";
+        let cached = vec![Diagnostic {
+            uri: uri.to_string(),
+            range: Range {
+                start: Position { line: 1, col: 1 },
+                end: Position { line: 1, col: 2 },
+            },
+            severity: Severity::Warning,
+            message: "cached check".to_string(),
+        }];
+
+        let mut state = RealAdapterState::new(
+            "definitely-not-a-real-isabelle".to_string(),
+            "HOL".to_string(),
+            Vec::new(),
+        );
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: "theory Example imports Main begin\nend\n".to_string(),
+                version: 7,
+                diagnostics: cached.clone(),
+            },
+        );
+
+        let diagnostics = state.check_document(uri, 7).await;
+        assert_eq!(diagnostics, cached);
     }
 }
