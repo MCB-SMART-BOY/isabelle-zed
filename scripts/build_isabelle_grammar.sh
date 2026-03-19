@@ -17,9 +17,18 @@ grammar_rev="$({
   awk -F'"' '
     /^\[grammars\.isabelle\]/ { in_section = 1; next }
     in_section && /^\[/ { in_section = 0 }
+    in_section && /^repository = / { print $2 > "/tmp/isabelle_grammar_repo_url" }
     in_section && /^rev = / { print $2; exit }
   ' "$ext_manifest"
 } || true)"
+
+grammar_repo_url="$(cat /tmp/isabelle_grammar_repo_url 2>/dev/null || true)"
+rm -f /tmp/isabelle_grammar_repo_url
+
+if [ -z "$grammar_repo_url" ]; then
+  echo "failed to read [grammars.isabelle].repository from $ext_manifest" >&2
+  exit 1
+fi
 
 if [ -z "$grammar_rev" ]; then
   echo "failed to read [grammars.isabelle].rev from $ext_manifest" >&2
@@ -38,12 +47,12 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-grammar_repo="$tmp_dir/tree-sitter-sml"
+grammar_repo="$tmp_dir/tree-sitter-isabelle"
 
-echo "Cloning tree-sitter-sml ($grammar_rev)..."
-git clone --depth 1 --branch "$grammar_rev" https://github.com/Giorbo/tree-sitter-sml "$grammar_repo" >/dev/null 2>&1 || {
+echo "Cloning tree-sitter-isabelle ($grammar_rev)..."
+git clone --depth 1 --branch "$grammar_rev" "$grammar_repo_url" "$grammar_repo" >/dev/null 2>&1 || {
   # Fall back to detached checkout when shallow branch clone by SHA is unsupported.
-  git clone --depth 1 https://github.com/Giorbo/tree-sitter-sml "$grammar_repo" >/dev/null 2>&1
+  git clone --depth 1 "$grammar_repo_url" "$grammar_repo" >/dev/null 2>&1
   git -C "$grammar_repo" fetch --depth 1 origin "$grammar_rev" >/dev/null 2>&1
   git -C "$grammar_repo" checkout "$grammar_rev" >/dev/null 2>&1
 }
@@ -65,17 +74,6 @@ static inline int iswspace(int c) {
 #endif
 H
 
-cat > "$tmp_dir/wrapper.c" <<'C'
-#include <stdint.h>
-
-typedef struct TSLanguage TSLanguage;
-const TSLanguage *tree_sitter_sml(void);
-
-const TSLanguage *tree_sitter_isabelle(void) {
-  return tree_sitter_sml();
-}
-C
-
 echo "Compiling Isabelle grammar wasm..."
 clang \
   --target=wasm32-unknown-unknown \
@@ -86,35 +84,32 @@ clang \
   -c "$grammar_repo/src/parser.c" \
   -o "$tmp_dir/parser.o"
 
-clang \
-  --target=wasm32-unknown-unknown \
-  -O2 \
-  -fPIC \
-  -I"$tmp_dir/include" \
-  -I"$grammar_repo/src" \
-  -c "$grammar_repo/src/scanner.c" \
-  -o "$tmp_dir/scanner.o"
+objects=("$tmp_dir/parser.o")
+exports=("--export=tree_sitter_isabelle")
 
-clang \
-  --target=wasm32-unknown-unknown \
-  -O2 \
-  -fPIC \
-  -I"$tmp_dir/include" \
-  -c "$tmp_dir/wrapper.c" \
-  -o "$tmp_dir/wrapper.o"
+if [ -f "$grammar_repo/src/scanner.c" ]; then
+  clang \
+    --target=wasm32-unknown-unknown \
+    -O2 \
+    -fPIC \
+    -I"$tmp_dir/include" \
+    -I"$grammar_repo/src" \
+    -c "$grammar_repo/src/scanner.c" \
+    -o "$tmp_dir/scanner.o"
+  objects+=("$tmp_dir/scanner.o")
+  exports+=(
+    "--export=tree_sitter_isabelle_external_scanner_create"
+    "--export=tree_sitter_isabelle_external_scanner_destroy"
+    "--export=tree_sitter_isabelle_external_scanner_scan"
+    "--export=tree_sitter_isabelle_external_scanner_serialize"
+    "--export=tree_sitter_isabelle_external_scanner_deserialize"
+  )
+fi
 
 "$rust_lld" -flavor wasm \
   --shared \
-  --export=tree_sitter_isabelle \
-  --export=tree_sitter_sml \
-  --export=tree_sitter_sml_external_scanner_create \
-  --export=tree_sitter_sml_external_scanner_destroy \
-  --export=tree_sitter_sml_external_scanner_scan \
-  --export=tree_sitter_sml_external_scanner_serialize \
-  --export=tree_sitter_sml_external_scanner_deserialize \
-  "$tmp_dir/parser.o" \
-  "$tmp_dir/scanner.o" \
-  "$tmp_dir/wrapper.o" \
+  "${exports[@]}" \
+  "${objects[@]}" \
   -o "$tmp_dir/isabelle.wasm"
 
 mkdir -p "$out_dir"

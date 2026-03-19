@@ -12,8 +12,8 @@ kind = "Rust"
 version = "0.1.0"
 
 [grammars.isabelle]
-repository = "https://github.com/Giorbo/tree-sitter-sml"
-rev = "f56de7d96dd3b9bb8e0a529a647313b900817507"
+repository = "https://github.com/TheAndiKurz/tree-sitter-isabelle"
+rev = "8576c89b9c913a77dcae6d2dc24a8831694bb690"
 
 [language_servers.isabelle-lsp]
 name = "Isabelle Bridge LSP"
