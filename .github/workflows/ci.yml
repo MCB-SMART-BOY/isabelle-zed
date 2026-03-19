@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, chore/rust-workspace-dedup]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, chore/rust-workspace-dedup]
+  workflow_dispatch:
 
 jobs:
   quality:
