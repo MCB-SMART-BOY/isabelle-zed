@@ -86,6 +86,7 @@ jobs:
   mock-e2e-ndjson:
     name: Mock E2E (Bridge <-> Scala NDJSON)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [bridge, scala-adapter, zed-extension]
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +103,10 @@ jobs:
       - name: Set up sbt
         uses: sbt/setup-sbt@v1
 
+      - name: Compile scala adapter
+        working-directory: scala-adapter
+        run: sbt -batch compile
+
       - name: Build bridge
         run: cargo build --manifest-path bridge/Cargo.toml --release
 
@@ -113,11 +118,11 @@ jobs:
 
       - name: Wait for scala adapter socket
         run: |
-          python3 - <<'PY'
+          if ! python3 - <<'PY'
           import socket
           import time
 
-          deadline = time.time() + 30
+          deadline = time.time() + 120
           while time.time() < deadline:
               sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
               sock.settimeout(0.25)
@@ -131,6 +136,11 @@ jobs:
 
           raise SystemExit("scala adapter socket was not reachable in time")
           PY
+          then
+            echo "scala adapter failed to become ready; recent log output:" >&2
+            tail -n 200 /tmp/scala-adapter.log >&2 || true
+            exit 1
+          fi
 
       - name: Start bridge (connected to scala adapter socket)
         run: |
@@ -166,6 +176,7 @@ jobs:
           }
 
           sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          sock.settimeout(5.0)
           sock.connect('/tmp/isabelle.sock')
           sock.sendall((json.dumps(req) + "\\n").encode())
 
@@ -212,6 +223,7 @@ jobs:
   mock-e2e-lsp:
     name: Mock E2E (LSP -> Bridge)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [bridge, isabelle-lsp, zed-extension]
     steps:
       - uses: actions/checkout@v4
@@ -246,6 +258,7 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import select
           import subprocess
           import time
 
@@ -256,18 +269,38 @@ jobs:
               stdin.write(body)
               stdin.flush()
 
-          def read_message(stdout, timeout=5.0):
+          def read_exact(stdout, size, timeout):
+              chunks = bytearray()
               deadline = time.time() + timeout
-              header = b""
-              while b"\\r\\n\\r\\n" not in header:
-                  if time.time() > deadline:
-                      raise TimeoutError("timed out waiting for LSP headers")
-                  chunk = stdout.read(1)
+              while len(chunks) < size:
+                  remaining = max(0.0, deadline - time.time())
+                  if remaining <= 0:
+                      raise TimeoutError("timed out waiting for LSP body bytes")
+                  ready, _, _ = select.select([stdout], [], [], remaining)
+                  if not ready:
+                      raise TimeoutError("timed out waiting for LSP body bytes")
+                  chunk = os.read(stdout.fileno(), size - len(chunks))
                   if not chunk:
                       raise RuntimeError("LSP server exited early")
-                  header += chunk
+                  chunks.extend(chunk)
+              return bytes(chunks)
 
-              headers = header.decode("utf-8").split("\\r\\n")
+          def read_message(stdout, timeout=5.0):
+              deadline = time.time() + timeout
+              header = bytearray()
+              while b"\\r\\n\\r\\n" not in header:
+                  remaining = max(0.0, deadline - time.time())
+                  if remaining <= 0:
+                      raise TimeoutError("timed out waiting for LSP headers")
+                  ready, _, _ = select.select([stdout], [], [], remaining)
+                  if not ready:
+                      raise TimeoutError("timed out waiting for LSP headers")
+                  chunk = os.read(stdout.fileno(), 1)
+                  if not chunk:
+                      raise RuntimeError("LSP server exited early")
+                  header.extend(chunk)
+
+              headers = bytes(header).decode("utf-8").split("\\r\\n")
               content_length = None
               for line in headers:
                   if line.lower().startswith("content-length:"):
@@ -277,9 +310,7 @@ jobs:
               if content_length is None:
                   raise RuntimeError(f"missing content-length header: {headers}")
 
-              body = stdout.read(content_length)
-              if len(body) != content_length:
-                  raise RuntimeError("incomplete LSP body")
+              body = read_exact(stdout, content_length, timeout)
 
               return json.loads(body.decode("utf-8"))
 
@@ -378,6 +409,7 @@ jobs:
   spawn-e2e-ndjson:
     name: Spawn E2E (Bridge --adapter-command)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [bridge]
     steps:
       - uses: actions/checkout@v4
@@ -422,6 +454,7 @@ jobs:
           }
 
           sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          sock.settimeout(5.0)
           sock.connect('/tmp/isabelle.sock')
           sock.sendall((json.dumps(req) + "\\n").encode())
 
