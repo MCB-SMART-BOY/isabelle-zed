@@ -46,6 +46,7 @@ Mock 模式（CI / 本地可复现测试）：
 - `--socket <PATH>`：监听 Unix Socket；省略则走 stdin/stdout
 - `--isabelle-path <PATH>`：Isabelle 可执行路径，默认 `isabelle`
 - `--logic <NAME>`：`process_theories` 使用的 logic image，默认 `HOL`
+- `--session-dir <PATH>`：附加 Isabelle session 搜索目录（可重复），会映射到 `process_theories -d <PATH>`
 - `--adapter-socket <HOST:PORT>`：连接外部已运行适配器（TCP）
 - `--adapter-command <CMD>`：使用自定义命令启动适配器进程（按 argv 解析后直接执行，不经 `bash -lc`）
 - `--debounce-ms <N>`：`document.push` 防抖窗口，默认 `300`
@@ -55,6 +56,7 @@ Mock 模式（CI / 本地可复现测试）：
 
 未设置 `--adapter-socket` 与 `--adapter-command` 时，bridge 会自动拉起内置 Rust real adapter。
 bridge 运行链路使用 Unix Domain Socket，目前仅支持 Unix（Linux/macOS）。
+real adapter 的 `markup` 会基于当前文档文本返回符号与行列上下文（语法级 hover，不依赖 Isabelle 语义 API）。
 
 ### 协议示例（精确）
 
@@ -142,6 +144,7 @@ External adapter socket mode:
 - `--socket <PATH>`: listen on a Unix socket; if omitted uses stdin/stdout
 - `--isabelle-path <PATH>`: Isabelle executable path (default `isabelle`)
 - `--logic <NAME>`: logic image passed to `process_theories` (default `HOL`)
+- `--session-dir <PATH>`: additional Isabelle session search directory (repeatable), mapped to `process_theories -d <PATH>`
 - `--adapter-socket <HOST:PORT>`: connect to external running adapter over TCP
 - `--adapter-command <CMD>`: start adapter process with a custom command (parsed into argv and executed directly, without `bash -lc`)
 - `--debounce-ms <N>`: debounce window for `document.push` (default `300`)
@@ -151,6 +154,7 @@ External adapter socket mode:
 
 If `--adapter-socket` and `--adapter-command` are both omitted, bridge starts its built-in Rust real adapter.
 The bridge runtime path uses Unix domain sockets and is currently Unix-only (Linux/macOS).
+Real-adapter `markup` returns symbol/position context from the current document text (syntax-level hover, without Isabelle semantic hover API).
 
 ### Protocol examples (exact)
 

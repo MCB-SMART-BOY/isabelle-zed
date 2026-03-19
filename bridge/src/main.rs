@@ -31,6 +31,9 @@ struct Args {
     #[arg(long, default_value = "HOL")]
     logic: String,
 
+    #[arg(long = "session-dir")]
+    session_dirs: Vec<PathBuf>,
+
     #[arg(long)]
     adapter_socket: Option<String>,
 
@@ -60,6 +63,7 @@ struct Args {
 struct SessionConfig {
     isabelle_path: String,
     logic: String,
+    session_dirs: Vec<PathBuf>,
     adapter_socket: Option<String>,
     adapter_command: Option<String>,
     debounce_ms: u64,
@@ -84,7 +88,7 @@ async fn main() -> Result<(), BridgeError> {
         return run_mock_adapter().await.map_err(BridgeError::from);
     }
     if args.real_adapter {
-        return run_real_adapter(args.isabelle_path, args.logic)
+        return run_real_adapter(args.isabelle_path, args.logic, args.session_dirs)
             .await
             .map_err(BridgeError::from);
     }
@@ -93,6 +97,7 @@ async fn main() -> Result<(), BridgeError> {
     let session = SessionConfig {
         isabelle_path: args.isabelle_path,
         logic: args.logic,
+        session_dirs: args.session_dirs,
         adapter_socket: args.adapter_socket,
         adapter_command: args.adapter_command,
         debounce_ms: args.debounce_ms,
@@ -203,6 +208,7 @@ where
     let mut process = ProcessManager::new(
         session.isabelle_path,
         session.logic,
+        session.session_dirs,
         session.mock,
         session.adapter_socket,
         session.adapter_command,

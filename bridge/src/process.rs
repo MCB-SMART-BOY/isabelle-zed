@@ -24,6 +24,7 @@ enum AdapterMode {
     SpawnReal {
         isabelle_path: String,
         logic: String,
+        session_dirs: Vec<PathBuf>,
         adapter_command: Option<String>,
     },
     MockSubprocess,
@@ -71,6 +72,7 @@ impl ProcessManager {
     pub fn new(
         isabelle_path: String,
         logic: String,
+        session_dirs: Vec<PathBuf>,
         mock_mode: bool,
         adapter_socket: Option<String>,
         adapter_command: Option<String>,
@@ -92,6 +94,7 @@ impl ProcessManager {
             AdapterMode::SpawnReal {
                 isabelle_path,
                 logic,
+                session_dirs,
                 adapter_command,
             }
         };
@@ -122,6 +125,7 @@ impl ProcessManager {
             AdapterMode::SpawnReal {
                 isabelle_path,
                 logic,
+                session_dirs,
                 adapter_command,
             } => match adapter_command {
                 Some(command_line) => {
@@ -131,7 +135,7 @@ impl ProcessManager {
                     self.start_spawn(command).await
                 }
                 None => {
-                    self.start_default_real_adapter(&isabelle_path, &logic)
+                    self.start_default_real_adapter(&isabelle_path, &logic, &session_dirs)
                         .await
                 }
             },
@@ -219,6 +223,7 @@ impl ProcessManager {
         &mut self,
         isabelle_path: &str,
         logic: &str,
+        session_dirs: &[PathBuf],
     ) -> Result<(), ProcessError> {
         let current_exe: PathBuf =
             std::env::current_exe().map_err(|err| ProcessError::Spawn(err.to_string()))?;
@@ -228,6 +233,10 @@ impl ProcessManager {
         command.arg(isabelle_path);
         command.arg("--logic");
         command.arg(logic);
+        for session_dir in session_dirs {
+            command.arg("--session-dir");
+            command.arg(session_dir);
+        }
         self.start_spawn(command).await
     }
 
@@ -441,14 +450,16 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
 struct RealAdapterState {
     isabelle_path: String,
     logic: String,
+    session_dirs: Vec<PathBuf>,
     latest_documents: HashMap<String, (String, i64)>,
 }
 
 impl RealAdapterState {
-    fn new(isabelle_path: String, logic: String) -> Self {
+    fn new(isabelle_path: String, logic: String, session_dirs: Vec<PathBuf>) -> Self {
         Self {
             isabelle_path,
             logic,
+            session_dirs,
             latest_documents: HashMap::new(),
         }
     }
@@ -523,16 +534,19 @@ impl RealAdapterState {
             }];
         }
 
-        let output = Command::new(&self.isabelle_path)
-            .arg("process_theories")
-            .arg("-l")
-            .arg(&self.logic)
-            .arg("-D")
-            .arg(temp_dir.path())
-            .arg("-O")
-            .arg(&theory_name)
-            .output()
-            .await;
+        let mut command = Command::new(&self.isabelle_path);
+        command.arg("process_theories");
+        command.arg("-l");
+        command.arg(&self.logic);
+        for session_dir in self.session_dirs_for_uri(uri) {
+            command.arg("-d");
+            command.arg(session_dir);
+        }
+        command.arg("-D");
+        command.arg(temp_dir.path());
+        command.arg("-O");
+        command.arg(&theory_name);
+        let output = command.output().await;
 
         match output {
             Ok(result) => {
@@ -556,15 +570,52 @@ impl RealAdapterState {
             }],
         }
     }
+
+    async fn hover_markup(&self, uri: &str, offset: Position) -> String {
+        let text = if let Some((text, _)) = self.latest_documents.get(uri) {
+            Some(text.clone())
+        } else {
+            read_document_from_uri(uri).await
+        };
+
+        let line = normalize_one_based(offset.line);
+        let col = normalize_one_based(offset.col);
+
+        match text {
+            Some(text) => build_hover_info(&text, line, col),
+            None => format!("No theory text available for hover at {line}:{col}"),
+        }
+    }
+
+    fn session_dirs_for_uri(&self, uri: &str) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        for session_dir in &self.session_dirs {
+            if !dirs.iter().any(|dir| dir == session_dir) {
+                dirs.push(session_dir.clone());
+            }
+        }
+
+        if let Some(parent) = parent_dir_from_file_uri(uri)
+            && !dirs.iter().any(|dir| dir == &parent)
+        {
+            dirs.push(parent);
+        }
+
+        dirs
+    }
 }
 
-pub async fn run_real_adapter(isabelle_path: String, logic: String) -> Result<(), ProcessError> {
+pub async fn run_real_adapter(
+    isabelle_path: String,
+    logic: String,
+    session_dirs: Vec<PathBuf>,
+) -> Result<(), ProcessError> {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
     let mut input = BufReader::new(stdin).lines();
     let mut output = tokio::io::BufWriter::new(stdout);
-    let mut state = RealAdapterState::new(isabelle_path, logic);
+    let mut state = RealAdapterState::new(isabelle_path, logic, session_dirs);
 
     while let Some(line) = input.next_line().await? {
         if line.trim().is_empty() {
@@ -607,10 +658,9 @@ pub async fn run_real_adapter(isabelle_path: String, logic: String) -> Result<()
             MessageType::Markup => {
                 let payload: MarkupRequest = serde_json::from_value(request.payload.clone())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?;
-                let info = format!(
-                    "Hover from process_theories backend is not available yet ({}:{})",
-                    payload.offset.line, payload.offset.col
-                );
+                let info = state
+                    .hover_markup(&payload.uri, payload.offset.clone())
+                    .await;
                 markup_message_from_request(&request, &payload.uri, payload.offset, &info)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
@@ -753,6 +803,16 @@ fn theory_name_from_uri(uri: &str) -> Option<String> {
         .map(std::string::ToString::to_string)
 }
 
+fn parent_dir_from_file_uri(uri: &str) -> Option<PathBuf> {
+    let parsed = Url::parse(uri).ok()?;
+    if parsed.scheme() != "file" {
+        return None;
+    }
+
+    let path = parsed.to_file_path().ok()?;
+    path.parent().map(|parent| parent.to_path_buf())
+}
+
 fn sanitize_theory_name(name: &str) -> String {
     name.chars()
         .map(|ch| {
@@ -763,6 +823,87 @@ fn sanitize_theory_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+fn normalize_one_based(value: i64) -> usize {
+    if value <= 1 {
+        1
+    } else {
+        usize::try_from(value).unwrap_or(usize::MAX)
+    }
+}
+
+fn build_hover_info(text: &str, line: usize, col: usize) -> String {
+    if text.is_empty() {
+        return format!("Document is empty at {line}:{col}");
+    }
+
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return format!("Document is empty at {line}:{col}");
+    }
+
+    if line > lines.len() {
+        return format!(
+            "Position {line}:{col} is outside document ({} lines)",
+            lines.len()
+        );
+    }
+
+    let line_text = lines[line - 1];
+    if let Some((identifier, start_col, end_col)) = extract_identifier_at(line_text, col) {
+        return format!(
+            "Identifier: {identifier}\nRange: {line}:{start_col}-{line}:{end_col}\n{line_text}"
+        );
+    }
+
+    format!("Position: {line}:{col}\n{line_text}")
+}
+
+fn extract_identifier_at(line_text: &str, col: usize) -> Option<(String, usize, usize)> {
+    let chars = line_text.char_indices().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+
+    let mut index = col.saturating_sub(1);
+    if index >= chars.len() {
+        index = chars.len() - 1;
+    }
+
+    if !is_identifier_char(chars[index].1) && index > 0 && is_identifier_char(chars[index - 1].1) {
+        index -= 1;
+    }
+    if !is_identifier_char(chars[index].1) {
+        return None;
+    }
+
+    let mut start = index;
+    while start > 0 && is_identifier_char(chars[start - 1].1) {
+        start -= 1;
+    }
+
+    let mut end = index;
+    while end + 1 < chars.len() && is_identifier_char(chars[end + 1].1) {
+        end += 1;
+    }
+
+    let start_byte = chars[start].0;
+    let end_byte = if end + 1 < chars.len() {
+        chars[end + 1].0
+    } else {
+        line_text.len()
+    };
+
+    Some((
+        line_text[start_byte..end_byte].to_string(),
+        start + 1,
+        end + 1,
+    ))
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '\'' | '.' | '-')
 }
 
 async fn read_document_from_uri(uri: &str) -> Option<String> {
@@ -818,5 +959,36 @@ Unfinished session(s): Draft
         assert_eq!(quoted.1, vec!["--mock-adapter".to_string()]);
 
         assert!(parse_adapter_command("   ").is_err());
+    }
+
+    #[test]
+    fn build_hover_info_extracts_identifier_and_range() {
+        let text = "theory Demo imports Main begin\nlemma foo_bar: True by simp\nend\n";
+        let info = build_hover_info(text, 2, 8);
+        assert!(info.contains("Identifier: foo_bar"));
+        assert!(info.contains("Range: 2:7-2:13"));
+    }
+
+    #[test]
+    fn build_hover_info_reports_out_of_range_position() {
+        let text = "theory Demo imports Main begin\nend\n";
+        let info = build_hover_info(text, 10, 1);
+        assert!(info.contains("outside document"));
+    }
+
+    #[test]
+    fn session_dirs_for_uri_merges_cli_and_uri_parent_without_duplicates() {
+        let mut state = RealAdapterState::new(
+            "isabelle".to_string(),
+            "HOL".to_string(),
+            vec![PathBuf::from("/tmp/work"), PathBuf::from("/tmp/work")],
+        );
+        state.latest_documents.insert(
+            "file:///tmp/work/Example.thy".to_string(),
+            ("theory Example imports Main begin\nend\n".to_string(), 1),
+        );
+
+        let dirs = state.session_dirs_for_uri("file:///tmp/work/Example.thy");
+        assert_eq!(dirs, vec![PathBuf::from("/tmp/work")]);
     }
 }

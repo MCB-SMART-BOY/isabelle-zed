@@ -209,10 +209,7 @@ impl IsabelleLanguageServer {
 
         let payload = serde_json::to_value(MarkupPayload {
             uri: uri.to_string(),
-            offset: BridgePosition {
-                line: i64::from(position.line),
-                col: i64::from(position.character),
-            },
+            offset: lsp_position_to_bridge(position),
             info: String::new(),
         })
         .map_err(|err| err.to_string())?;
@@ -486,6 +483,13 @@ fn command_target_uri(argument: Option<&Value>) -> Option<String> {
     }
 }
 
+fn lsp_position_to_bridge(position: Position) -> BridgePosition {
+    BridgePosition {
+        line: i64::from(position.line.saturating_add(1)),
+        col: i64::from(position.character.saturating_add(1)),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -750,5 +754,16 @@ mod tests {
     #[test]
     fn rejects_empty_autostart_command() {
         assert!(autostart::parse_autostart_command("   ").is_err());
+    }
+
+    #[test]
+    fn converts_lsp_hover_position_to_bridge_one_based() {
+        let converted = lsp_position_to_bridge(tower_lsp::lsp_types::Position::new(0, 0));
+        assert_eq!(converted.line, 1);
+        assert_eq!(converted.col, 1);
+
+        let converted = lsp_position_to_bridge(tower_lsp::lsp_types::Position::new(4, 9));
+        assert_eq!(converted.line, 5);
+        assert_eq!(converted.col, 10);
     }
 }

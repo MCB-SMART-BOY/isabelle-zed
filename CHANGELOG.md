@@ -22,6 +22,9 @@ All notable changes to this project are documented in this file.
 - bridge integration test path for `--adapter-command` no longer depends on `python3`.
 - `isabelle.start_session` now logs “started” only after a successful start/check flow.
 - documentation and runtime hints now use direct `cargo`/`xtask` commands (no `make` indirection).
+- bridge real-adapter `markup` now returns syntax-level hover context (identifier/range/line text) instead of a placeholder message.
+- `isabelle-zed-lsp` now converts hover positions from LSP 0-based to bridge 1-based before forwarding.
+- bridge real-adapter now supports repeatable `--session-dir` (mapped to `process_theories -d`) and auto-adds the checked file's parent directory to session lookup paths.
 
 ### Removed
 

@@ -188,6 +188,8 @@ bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
 ```
 
 `--adapter-command` 会按 argv 解析后直接执行（不经 `bash -lc`）。
+bridge real adapter 支持 `--session-dir <path>`（可重复）补充 `process_theories -d` 搜索路径；
+并会自动把目标 `.thy` 所在目录加入 session 搜索路径。
 
 如果你希望 `isabelle-zed-lsp` 自动拉起 bridge，请在启动 Zed 前设置（示例）：
 
@@ -401,6 +403,8 @@ bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
 ```
 
 `--adapter-command` is parsed into argv and executed directly (without `bash -lc`).
+The bridge real adapter supports repeatable `--session-dir <path>` to extend `process_theories -d` lookup paths,
+and also auto-adds the target `.thy` parent directory as a session search path.
 
 If you want `isabelle-zed-lsp` to autostart bridge, set these before launching Zed:
 
