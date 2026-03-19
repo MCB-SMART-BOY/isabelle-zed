@@ -183,7 +183,7 @@ jobs:
 
           data = b''
           deadline = time.time() + 30.0
-          while not data.endswith(b"\\n"):
+          while not data.endswith(b"\n"):
               if time.time() >= deadline:
                   raise TimeoutError("timed out waiting for bridge response")
               try:
@@ -271,7 +271,7 @@ jobs:
 
           def send_message(stdin, message):
               body = json.dumps(message).encode("utf-8")
-              header = f"Content-Length: {len(body)}\\r\\n\\r\\n".encode("utf-8")
+              header = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8")
               stdin.write(header)
               stdin.write(body)
               stdin.flush()
@@ -295,7 +295,7 @@ jobs:
           def read_message(stdout, timeout=5.0):
               deadline = time.time() + timeout
               header = bytearray()
-              while b"\\r\\n\\r\\n" not in header:
+              while b"\r\n\r\n" not in header:
                   remaining = max(0.0, deadline - time.time())
                   if remaining <= 0:
                       raise TimeoutError("timed out waiting for LSP headers")
@@ -307,7 +307,7 @@ jobs:
                       raise RuntimeError("LSP server exited early")
                   header.extend(chunk)
 
-              headers = bytes(header).decode("utf-8").split("\\r\\n")
+              headers = bytes(header).decode("utf-8").split("\r\n")
               content_length = None
               for line in headers:
                   if line.lower().startswith("content-length:"):
@@ -468,7 +468,7 @@ jobs:
 
           data = b''
           deadline = time.time() + 30.0
-          while not data.endswith(b"\\n"):
+          while not data.endswith(b"\n"):
               if time.time() >= deadline:
                   raise TimeoutError("timed out waiting for bridge response")
               try:
