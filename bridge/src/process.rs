@@ -4,6 +4,7 @@ use crate::protocol::{
 };
 use regex::Regex;
 use serde::Deserialize;
+use shell_words::split as split_shell_words;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -124,8 +125,9 @@ impl ProcessManager {
                 adapter_command,
             } => match adapter_command {
                 Some(command_line) => {
-                    let mut command = Command::new("bash");
-                    command.arg("-lc").arg(command_line);
+                    let (program, args) = parse_adapter_command(&command_line)?;
+                    let mut command = Command::new(program);
+                    command.args(args);
                     self.start_spawn(command).await
                 }
                 None => {
@@ -333,6 +335,22 @@ impl ProcessManager {
         tokio::time::sleep(delay).await;
         self.start().await
     }
+}
+
+fn parse_adapter_command(command_line: &str) -> Result<(String, Vec<String>), ProcessError> {
+    let parts = split_shell_words(command_line).map_err(|err| {
+        ProcessError::Spawn(format!(
+            "invalid --adapter-command (shell parse error): {err}"
+        ))
+    })?;
+
+    if parts.is_empty() {
+        return Err(ProcessError::Spawn(
+            "invalid --adapter-command: command is empty".to_string(),
+        ));
+    }
+
+    Ok((parts[0].clone(), parts[1..].to_vec()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -785,5 +803,20 @@ Unfinished session(s): Draft
             "theory Demo imports Main begin\nend\n",
         );
         assert_eq!(name, "Demo");
+    }
+
+    #[test]
+    fn parse_adapter_command_parses_and_validates() {
+        let parsed =
+            parse_adapter_command("bridge --mock-adapter").expect("adapter command should parse");
+        assert_eq!(parsed.0, "bridge");
+        assert_eq!(parsed.1, vec!["--mock-adapter".to_string()]);
+
+        let quoted = parse_adapter_command("\"/tmp/my bridge\" --mock-adapter")
+            .expect("quoted adapter command should parse");
+        assert_eq!(quoted.0, "/tmp/my bridge");
+        assert_eq!(quoted.1, vec!["--mock-adapter".to_string()]);
+
+        assert!(parse_adapter_command("   ").is_err());
     }
 }

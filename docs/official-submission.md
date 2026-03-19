@@ -11,7 +11,7 @@
 在 `<repo-root>` 执行：
 
 ```bash
-make zed-official-check
+cargo run -p isabelle-zed-xtask -- zed-official-check
 ```
 
 该命令会检查：扩展 ID、许可证文件，以及官方仓库中是否已存在同名 ID。
@@ -75,7 +75,7 @@ PR 描述建议包含：
 1. 在本仓库更新 `zed-extension/extension.toml` 的 `version`
 2. 更新 `CHANGELOG.md`
 3. 可选：打 tag / 发 release
-4. 通过 `make release-package` 生成发布包（包含 `LICENSE`、`docs/CHANGELOG.md` 与 `zed-extension/grammars/isabelle.wasm`）
+4. 通过 `cargo run -p isabelle-zed-xtask -- release-package` 生成发布包（包含 `LICENSE`、`docs/CHANGELOG.md` 与 `zed-extension/grammars/isabelle.wasm`）
 5. 在你的 `extensions` fork 中更新：
    - `extensions/isabelle` 子模块提交
    - `extensions.toml` 里的 `[isabelle]` 版本
@@ -98,7 +98,7 @@ Use this guide to submit this project to the official Zed extension registry:
 From `<repo-root>`:
 
 ```bash
-make zed-official-check
+cargo run -p isabelle-zed-xtask -- zed-official-check
 ```
 
 This checks extension ID rules, license files, and duplicate ID against the official registry.
@@ -162,7 +162,7 @@ Recommended PR notes:
 1. Bump `version` in `zed-extension/extension.toml` in this repository
 2. Update `CHANGELOG.md`
 3. Optional: create tag/release
-4. Build release package via `make release-package` (includes `LICENSE`, `docs/CHANGELOG.md`, and `zed-extension/grammars/isabelle.wasm`)
+4. Build release package via `cargo run -p isabelle-zed-xtask -- release-package` (includes `LICENSE`, `docs/CHANGELOG.md`, and `zed-extension/grammars/isabelle.wasm`)
 5. In your fork of `extensions`, update:
    - `extensions/isabelle` submodule commit
    - `[isabelle]` version in `extensions.toml`

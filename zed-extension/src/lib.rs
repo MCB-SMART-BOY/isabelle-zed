@@ -1,3 +1,5 @@
+mod session_logic;
+
 use std::collections::HashMap;
 use zed_extension_api::{self as zed, LanguageServerId, serde_json::Value, settings::LspSettings};
 
@@ -134,7 +136,7 @@ fn native_default_args(settings_json: &Option<Value>, worktree: &zed::Worktree) 
     let mut args = vec!["vscode_server".to_string()];
 
     let logic = setting_string(settings_json, SETTINGS_KEY_NATIVE_LOGIC)
-        .or_else(|| auto_logic_from_root(worktree));
+        .or_else(|| session_logic::auto_logic_from_root(worktree));
     if let Some(logic) = logic {
         args.push("-l".to_string());
         args.push(logic);
@@ -166,208 +168,6 @@ fn native_default_args(settings_json: &Option<Value>, worktree: &zed::Worktree) 
 
 fn worktree_has_session_root(worktree: &zed::Worktree) -> bool {
     worktree.read_text_file("ROOT").is_ok() || worktree.read_text_file("ROOTS").is_ok()
-}
-
-#[derive(Clone, Debug)]
-struct SessionInfo {
-    name: String,
-    parent: Option<String>,
-    origin: SessionOrigin,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SessionOrigin {
-    WorktreeRoot,
-    OtherRoot,
-}
-
-fn auto_logic_from_root(worktree: &zed::Worktree) -> Option<String> {
-    let mut sessions = Vec::new();
-    collect_sessions_from_root(worktree, "ROOT", SessionOrigin::WorktreeRoot, &mut sessions);
-
-    if let Ok(roots) = worktree.read_text_file("ROOTS") {
-        for line in roots.lines() {
-            let Some(root_entry) = parse_roots_line(line) else {
-                continue;
-            };
-            let root_path = format!("{}/ROOT", root_entry.trim_end_matches('/'));
-            collect_sessions_from_root(
-                worktree,
-                &root_path,
-                SessionOrigin::OtherRoot,
-                &mut sessions,
-            );
-        }
-    }
-
-    pick_auto_logic(&sessions)
-}
-
-fn pick_auto_logic(sessions: &[SessionInfo]) -> Option<String> {
-    let root_names = unique_session_names(
-        sessions
-            .iter()
-            .filter(|session| session.origin == SessionOrigin::WorktreeRoot),
-    );
-    if root_names.len() == 1 {
-        return root_names.into_iter().next();
-    }
-
-    let hol_names = unique_session_names(
-        sessions
-            .iter()
-            .filter(|session| session.parent.as_deref() == Some("HOL")),
-    );
-    if hol_names.len() == 1 {
-        return hol_names.into_iter().next();
-    }
-
-    None
-}
-
-fn unique_session_names<'a, I>(sessions: I) -> Vec<String>
-where
-    I: IntoIterator<Item = &'a SessionInfo>,
-{
-    let mut unique = Vec::new();
-    for session in sessions {
-        if !unique.contains(&session.name) {
-            unique.push(session.name.clone());
-        }
-    }
-    unique
-}
-
-fn collect_sessions_from_root(
-    worktree: &zed::Worktree,
-    path: &str,
-    origin: SessionOrigin,
-    out: &mut Vec<SessionInfo>,
-) {
-    let Ok(text) = worktree.read_text_file(path) else {
-        return;
-    };
-
-    for line in text.lines() {
-        if let Some((name, parent)) = parse_session_from_line(line) {
-            out.push(SessionInfo {
-                name,
-                parent,
-                origin,
-            });
-        }
-    }
-}
-
-fn parse_session_from_line(line: &str) -> Option<(String, Option<String>)> {
-    let trimmed = line.trim_start();
-    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("(*") {
-        return None;
-    }
-
-    let trimmed = strip_unquoted_hash_comment(trimmed);
-    let trimmed = trimmed.trim_start();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let tokens = tokenize_root_line(trimmed);
-    let first = tokens.first()?;
-    if first != "session" {
-        return None;
-    }
-
-    let name = tokens.get(1)?.clone();
-    if name.is_empty() {
-        return None;
-    }
-
-    let mut parent = None;
-    for window in tokens.windows(2) {
-        if window[0] == "=" {
-            let candidate = window[1].clone();
-            if !candidate.is_empty() {
-                parent = Some(candidate);
-            }
-            break;
-        }
-    }
-
-    Some((name, parent))
-}
-
-fn parse_roots_line(line: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return None;
-    }
-
-    let trimmed = strip_unquoted_hash_comment(trimmed);
-    let trimmed = trimmed.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some(quoted) = trimmed.strip_prefix('"') {
-        let name = quoted.split('"').next().unwrap_or("").trim();
-        if name.is_empty() {
-            None
-        } else {
-            Some(name.to_string())
-        }
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn strip_unquoted_hash_comment(line: &str) -> String {
-    let mut out = String::new();
-    let mut in_quotes = false;
-    for ch in line.chars() {
-        if ch == '"' {
-            in_quotes = !in_quotes;
-            out.push(ch);
-            continue;
-        }
-        if ch == '#' && !in_quotes {
-            break;
-        }
-        out.push(ch);
-    }
-    out
-}
-
-fn tokenize_root_line(line: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut chars = line.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch.is_whitespace() {
-            continue;
-        }
-        if ch == '"' {
-            let mut token = String::new();
-            while let Some(next) = chars.next() {
-                if next == '"' {
-                    break;
-                }
-                token.push(next);
-            }
-            tokens.push(token);
-            continue;
-        }
-
-        let mut token = String::new();
-        token.push(ch);
-        while let Some(next) = chars.peek() {
-            if next.is_whitespace() {
-                break;
-            }
-            token.push(*next);
-            chars.next();
-        }
-        tokens.push(token);
-    }
-    tokens
 }
 
 fn resolve_environment(
@@ -501,6 +301,7 @@ zed::register_extension!(IsabelleExtension);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_logic::{SessionInfo, SessionOrigin};
     use zed::serde_json::json;
 
     #[test]
@@ -582,34 +383,40 @@ mod tests {
     #[test]
     fn parse_session_line_extracts_name_and_parent() {
         assert_eq!(
-            parse_session_from_line("session Foo = HOL"),
+            session_logic::parse_session_from_line("session Foo = HOL"),
             Some(("Foo".to_string(), Some("HOL".to_string())))
         );
         assert_eq!(
-            parse_session_from_line(
+            session_logic::parse_session_from_line(
                 "session \"Foo Bar\" in \"dir with space\" = \"HOL\" # comment"
             ),
             Some(("Foo Bar".to_string(), Some("HOL".to_string())))
         );
         assert_eq!(
-            parse_session_from_line("session Foo"),
+            session_logic::parse_session_from_line("session Foo"),
             Some(("Foo".to_string(), None))
         );
-        assert_eq!(parse_session_from_line("# session Foo = HOL"), None);
-        assert_eq!(parse_session_from_line("(* session Foo = HOL *)"), None);
+        assert_eq!(
+            session_logic::parse_session_from_line("# session Foo = HOL"),
+            None
+        );
+        assert_eq!(
+            session_logic::parse_session_from_line("(* session Foo = HOL *)"),
+            None
+        );
     }
 
     #[test]
     fn parse_roots_line_handles_quotes_and_comments() {
         assert_eq!(
-            parse_roots_line("src/logic  # comment"),
+            session_logic::parse_roots_line("src/logic  # comment"),
             Some("src/logic".to_string())
         );
         assert_eq!(
-            parse_roots_line("\"src with space\""),
+            session_logic::parse_roots_line("\"src with space\""),
             Some("src with space".to_string())
         );
-        assert_eq!(parse_roots_line("# only comment"), None);
+        assert_eq!(session_logic::parse_roots_line("# only comment"), None);
     }
 
     #[test]
@@ -627,7 +434,10 @@ mod tests {
             },
         ];
 
-        assert_eq!(pick_auto_logic(&sessions), Some("RootOnly".to_string()));
+        assert_eq!(
+            session_logic::pick_auto_logic(&sessions),
+            Some("RootOnly".to_string())
+        );
     }
 
     #[test]
@@ -650,7 +460,10 @@ mod tests {
             },
         ];
 
-        assert_eq!(pick_auto_logic(&sessions), Some("HolChild".to_string()));
+        assert_eq!(
+            session_logic::pick_auto_logic(&sessions),
+            Some("HolChild".to_string())
+        );
     }
 
     #[test]
@@ -668,6 +481,6 @@ mod tests {
             },
         ];
 
-        assert_eq!(pick_auto_logic(&sessions), None);
+        assert_eq!(session_logic::pick_auto_logic(&sessions), None);
     }
 }

@@ -7,44 +7,8 @@ on:
     branches: [main, master]
 
 jobs:
-  bridge:
-    name: Bridge (Rust)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Format check
-        run: cargo fmt -p isabelle-bridge -- --check
-
-      - name: Clippy
-        run: cargo clippy -p isabelle-bridge -- -D warnings
-
-      - name: Test
-        run: cargo test -p isabelle-bridge
-
-  isabelle-lsp:
-    name: Isabelle LSP (Rust)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Format check
-        run: cargo fmt -p isabelle-zed-lsp -- --check
-
-      - name: Clippy
-        run: cargo clippy -p isabelle-zed-lsp -- -D warnings
-
-      - name: Test
-        run: cargo test -p isabelle-zed-lsp
-
-  zed-extension:
-    name: Zed Extension
+  quality:
+    name: Workspace Quality Gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,29 +18,23 @@ jobs:
         with:
           targets: wasm32-wasip2
 
-      - name: Check (host)
-        run: cargo check -p isabelle-zed-extension
+      - name: Format check
+        run: cargo fmt --all -- --check
 
-      - name: Check (wasm32-wasip2)
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Check extension wasm target
         run: cargo check -p isabelle-zed-extension --target wasm32-wasip2
-
-  xtask:
-    name: Xtask
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Check
-        run: cargo check -p isabelle-zed-xtask
 
   mock-e2e-ndjson:
     name: Mock E2E (Bridge --adapter-command)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [bridge, xtask]
+    needs: [quality]
     steps:
       - uses: actions/checkout@v4
 
@@ -90,7 +48,7 @@ jobs:
     name: Mock E2E (LSP -> Bridge)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [bridge, isabelle-lsp, xtask]
+    needs: [quality]
     steps:
       - uses: actions/checkout@v4
 

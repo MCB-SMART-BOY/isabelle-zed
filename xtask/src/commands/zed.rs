@@ -78,7 +78,7 @@ pub(crate) fn install_native(repo_root: &Path) -> Result<()> {
     let grammar_src = repo_root.join("zed-extension/grammars/isabelle.wasm");
     if !grammar_src.is_file() {
         bail!(
-            "missing grammar artifact: {} (run: make build-isabelle-grammar)",
+            "missing grammar artifact: {} (run: cargo run -p isabelle-zed-xtask -- build-isabelle-grammar)",
             grammar_src.display()
         );
     }
@@ -589,7 +589,7 @@ pub(crate) fn release_package(repo_root: &Path, platform: Option<String>) -> Res
     let grammar_src = repo_root.join("zed-extension/grammars/isabelle.wasm");
     if !grammar_src.is_file() {
         bail!(
-            "missing grammar artifact: {} (run: make build-isabelle-grammar)",
+            "missing grammar artifact: {} (run: cargo run -p isabelle-zed-xtask -- build-isabelle-grammar)",
             grammar_src.display()
         );
     }

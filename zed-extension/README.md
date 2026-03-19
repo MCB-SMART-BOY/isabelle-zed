@@ -7,7 +7,7 @@
 在仓库根目录（`<repo-root>`）执行：
 
 ```bash
-make install-zed-native
+cargo run -p isabelle-zed-xtask -- install-zed-native
 ```
 
 命令会把扩展安装到 Zed 本地扩展目录，扩展默认走 `native` 模式，无需手动编辑 `settings.json`。
@@ -17,13 +17,13 @@ make install-zed-native
 如果仓库里缺少 `zed-extension/grammars/isabelle.wasm`，先执行：
 
 ```bash
-make build-isabelle-grammar
+cargo run -p isabelle-zed-xtask -- build-isabelle-grammar
 ```
 
 卸载：
 
 ```bash
-make uninstall-zed-native
+cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 ```
 
 Windows 原生安装/卸载与 Linux/macOS 使用同一套 Rust 命令：
@@ -35,6 +35,8 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 
 说明：
 
+- 上述是 native 模式（直接调用 `isabelle vscode_server`），支持 Windows/Linux/macOS。
+- 若切换到 bridge 模式，bridge / isabelle-zed-lsp 目前基于 Unix Domain Socket，仅支持 Linux/macOS。
 - Windows 默认会安装快捷键；如需跳过，设置 `ISABELLE_ZED_SKIP_SHORTCUTS=1`。
 - 单独安装/卸载快捷键：
 
@@ -60,8 +62,8 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 单独安装/卸载快捷键：
 
 ```bash
-make install-zed-shortcuts
-make uninstall-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- install-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 ```
 
 补充任务（从任务面板运行）：
@@ -89,7 +91,7 @@ cargo build -p isabelle-zed-extension --target wasm32-wasip2 --release
 或：
 
 ```bash
-make release-build
+cargo run -p isabelle-zed-xtask -- release-build
 ```
 
 ### 可选设置示例
@@ -130,7 +132,7 @@ Bridge 自动拉起配置说明：
 ### 官方收录预检查
 
 ```bash
-make zed-official-check
+cargo run -p isabelle-zed-xtask -- zed-official-check
 ```
 
 该命令会输出提交到 `zed-industries/extensions` 时可用的 `extensions.toml` 片段。
@@ -138,8 +140,8 @@ make zed-official-check
 ### 发布与打包
 
 ```bash
-make doctor
-make release-package
+cargo run -p isabelle-zed-xtask -- doctor
+cargo run -p isabelle-zed-xtask -- release-package
 ```
 
 打包产物包含扩展清单与 wasm 文件，以及 `bridge` / `isabelle-zed-lsp` 二进制。
@@ -161,7 +163,7 @@ make release-package
 From repository root (`<repo-root>`):
 
 ```bash
-make install-zed-native
+cargo run -p isabelle-zed-xtask -- install-zed-native
 ```
 
 The command installs the extension into Zed's local extension directory.
@@ -172,13 +174,13 @@ Requirement: `isabelle` must be on `PATH`.
 If `zed-extension/grammars/isabelle.wasm` is missing, run:
 
 ```bash
-make build-isabelle-grammar
+cargo run -p isabelle-zed-xtask -- build-isabelle-grammar
 ```
 
 Uninstall:
 
 ```bash
-make uninstall-zed-native
+cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 ```
 
 Windows uses the same Rust command entrypoints as Linux/macOS:
@@ -190,6 +192,8 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 
 Notes:
 
+- The commands above target native mode (`isabelle vscode_server`) and work on Windows/Linux/macOS.
+- Bridge mode currently relies on Unix domain sockets (bridge + isabelle-zed-lsp), so it is Unix-only (Linux/macOS).
 - Shortcuts are installed by default; to skip, set `ISABELLE_ZED_SKIP_SHORTCUTS=1`.
 - Install/uninstall shortcuts only:
 
@@ -215,8 +219,8 @@ Default shortcuts:
 Install/uninstall shortcuts only:
 
 ```bash
-make install-zed-shortcuts
-make uninstall-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- install-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 ```
 
 Extra tasks (run from the task palette):
@@ -244,7 +248,7 @@ cargo build -p isabelle-zed-extension --target wasm32-wasip2 --release
 Or:
 
 ```bash
-make release-build
+cargo run -p isabelle-zed-xtask -- release-build
 ```
 
 ### Optional settings examples
@@ -285,7 +289,7 @@ Bridge autostart configuration note:
 ### Official registry pre-check
 
 ```bash
-make zed-official-check
+cargo run -p isabelle-zed-xtask -- zed-official-check
 ```
 
 This prints the `extensions.toml` snippet for your PR to `zed-industries/extensions`.
@@ -293,8 +297,8 @@ This prints the `extensions.toml` snippet for your PR to `zed-industries/extensi
 ### Release and packaging
 
 ```bash
-make doctor
-make release-package
+cargo run -p isabelle-zed-xtask -- doctor
+cargo run -p isabelle-zed-xtask -- release-package
 ```
 
 The package includes extension manifest + wasm artifact and `bridge` / `isabelle-zed-lsp` binaries.

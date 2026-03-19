@@ -679,6 +679,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "shell-words",
  "tempfile",
  "thiserror 1.0.64",
  "tokio",

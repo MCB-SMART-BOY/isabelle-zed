@@ -16,6 +16,7 @@ clap.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+shell-words.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }

@@ -10,8 +10,15 @@
   Rust NDJSON bridge（编辑器与 adapter 后端之间）。
 - `isabelle-lsp/`
   Rust LSP 代理（Zed LSP 协议侧）。
+  内部按模块分层：
+  - `main.rs` 保留 LSP 生命周期和编排逻辑；
+  - `transport.rs` 负责 bridge 请求、重连和超时；
+  - `diagnostics.rs` 负责 bridge->LSP 诊断映射与发布；
+  - `push.rs` 负责 `document.push` 防抖队列与后台刷新 worker；
+  - `autostart.rs` 负责 bridge 自动拉起与 socket 健康检查。
 - `zed-extension/`
   Zed 扩展（WASM）。
+  结构上将 ROOT/ROOTS 会话解析与自动 logic 选择抽离到 `session_logic.rs`，降低 `lib.rs` 耦合。
 - `xtask/`
   Rust 工具入口，替代历史 shell/python/powershell 脚本。
   内部按分层组织：
@@ -41,7 +48,7 @@
 
 - 避免新增跨语言脚本工具链依赖，优先 Rust 实现。
 - 避免成员级 `Cargo.lock`，统一由根 workspace 管理（根 `Cargo.lock` 作为单一锁文件）。
-- 发布流程入口统一在 `xtask`，`Makefile` 仅做别名层。
+- 发布/安装/e2e 流程入口统一在 `xtask`，不再依赖 `Makefile`。
 
 ## English
 
@@ -53,8 +60,15 @@ The repository uses a single Cargo workspace. The root `Cargo.toml` is the sourc
   Rust NDJSON bridge between editor and adapter backend.
 - `isabelle-lsp/`
   Rust LSP proxy.
+  Internal layering:
+  - `main.rs` for LSP lifecycle/orchestration.
+  - `transport.rs` for bridge request/retry/timeout.
+  - `diagnostics.rs` for bridge->LSP diagnostic mapping/publication.
+  - `push.rs` for `document.push` debounce queue and background flush worker.
+  - `autostart.rs` for bridge autostart and socket health checks.
 - `zed-extension/`
   Zed extension (WASM).
+  Session parsing and auto-logic selection from ROOT/ROOTS are split into `session_logic.rs` to keep `lib.rs` smaller and less coupled.
 - `xtask/`
   Rust task runner replacing legacy shell/python/powershell scripts.
   Internal layering:
@@ -80,4 +94,4 @@ The repository uses a single Cargo workspace. The root `Cargo.toml` is the sourc
 
 - Prefer Rust implementations over new cross-language script dependencies.
 - Keep lockfile ownership at workspace root (single tracked root `Cargo.lock`, no member `Cargo.lock`).
-- Keep release/install/e2e flows centralized in `xtask`; `Makefile` remains an alias layer.
+- Keep release/install/e2e flows centralized in `xtask`; no Makefile alias layer.

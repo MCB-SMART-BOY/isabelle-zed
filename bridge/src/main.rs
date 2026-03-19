@@ -1,3 +1,6 @@
+#[cfg(not(unix))]
+compile_error!("isabelle-bridge currently supports Unix only (requires Unix domain sockets)");
+
 use bridge::process::{ProcessError, ProcessManager, run_mock_adapter, run_real_adapter};
 use bridge::protocol::{MessageType, parse_message};
 use bridge::queue::{DebounceQueue, QueueError};

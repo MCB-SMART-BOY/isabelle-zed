@@ -7,17 +7,27 @@ All notable changes to this project are documented in this file.
 ### Changed
 
 - bridge default real mode now starts a built-in Rust real-adapter subprocess (`--real-adapter`) instead of depending on Scala/sbt fallback discovery.
-- build/release/install/check automation is now unified under Rust `xtask` commands and wired into `Makefile` and GitHub workflows.
+- build/release/install/check automation is now unified under Rust `xtask` commands and wired into GitHub workflows/documentation.
 - repository Cargo setup is now a single root workspace (`bridge` / `isabelle-lsp` / `zed-extension` / `xtask`) with shared dependency version management.
-- workspace command style is now standardized on package-based Cargo entrypoints (`cargo -p ...` / `cargo run -p isabelle-zed-xtask -- ...`) across Makefile, CI, and docs.
+- workspace command style is now standardized on package-based Cargo entrypoints (`cargo -p ...` / `cargo run -p isabelle-zed-xtask -- ...`) across CI and docs.
 - added `docs/project-structure.md` to document repository layering and governance conventions.
 - xtask implementation is now split into layered modules (`cli` / `common` / `commands/*`) instead of a single monolithic `main.rs`.
 - fixed `xtask doctor` artifact checks to use workspace-level `target/...` paths consistently.
+- `isabelle-lsp` is now split into `main` + `transport` + `diagnostics` + `autostart` modules to reduce single-file coupling.
+- `isabelle-lsp` push/debounce worker logic is now split into a dedicated `push` module.
+- `zed-extension` now isolates ROOT/ROOTS session parsing and auto-logic selection in `session_logic.rs`.
+- bridge `--adapter-command` now parses argv and executes directly, removing the `bash -lc` execution path.
+- CI/release workflows now enforce workspace-wide quality gates (`fmt`, `clippy -D warnings`, `test`, wasm target check) before E2E/package steps.
+- docs now explicitly describe native-mode cross-platform behavior vs Unix-only bridge-mode constraints.
+- bridge integration test path for `--adapter-command` no longer depends on `python3`.
+- `isabelle.start_session` now logs “started” only after a successful start/check flow.
+- documentation and runtime hints now use direct `cargo`/`xtask` commands (no `make` indirection).
 
 ### Removed
 
 - removed `scala-adapter/` (Scala codebase) from the runtime/tooling path.
 - removed non-Rust helper scripts under `scripts/` (shell/python/powershell), replaced by Rust tooling commands.
+- removed root `Makefile` alias layer.
 - removed redundant root placeholder crate (`src/lib.rs`) and member lockfile duplication (`zed-extension/Cargo.lock`).
 
 ## [0.2.3] - 2026-03-05

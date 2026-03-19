@@ -1,34 +1,36 @@
+#[cfg(not(unix))]
+compile_error!("isabelle-zed-lsp currently supports Unix only (requires Unix domain sockets)");
+
+mod autostart;
+mod diagnostics;
+mod push;
+mod transport;
+
+#[cfg(test)]
+use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
-    Diagnostic as BridgeDiagnostic, DocumentCheckPayload, DocumentPushPayload, MarkupPayload,
-    Message, MessageType, Position as BridgePosition, Severity, parse_message, to_ndjson,
+    DocumentCheckPayload, MarkupPayload, Message, MessageType, Position as BridgePosition,
 };
+use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
+use push::{PushEvent, spawn_push_worker};
 use serde_json::Value;
-use shell_words::split as split_shell_words;
-use std::collections::{HashMap, HashSet};
-use std::io::ErrorKind;
-#[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
-use tokio::time::{Duration, Instant, MissedTickBehavior};
+use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::time::Duration;
 use tower_lsp::jsonrpc::Result as JsonRpcResult;
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, ExecuteCommandOptions, Hover, HoverContents,
-    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, MarkedString,
-    MessageType as LspMessageType, Position, PublishDiagnosticsParams, Range, ServerCapabilities,
-    ServerInfo, TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Url,
+    ExecuteCommandOptions, Hover, HoverContents, HoverProviderCapability, InitializeParams,
+    InitializeResult, InitializedParams, MarkedString, MessageType as LspMessageType, Position,
+    ServerCapabilities, ServerInfo, TextDocumentContentChangeEvent, TextDocumentItem,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
+#[cfg(test)]
+use transport::BridgeError;
+use transport::BridgeTransport;
 
 const DEFAULT_BRIDGE_SOCKET: &str = "/tmp/isabelle.sock";
 const DEFAULT_SESSION: &str = "s1";
@@ -44,200 +46,17 @@ const COMMAND_START_SESSION: &str = "isabelle.start_session";
 const COMMAND_STOP_SESSION: &str = "isabelle.stop_session";
 const COMMAND_RUN_CHECK: &str = "isabelle.run_check";
 
-#[derive(Debug, Error)]
-enum BridgeError {
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("bridge request timed out after {timeout_ms}ms")]
-    Timeout { timeout_ms: u64 },
-    #[error("bridge returned EOF")]
-    Eof,
-    #[error("invalid response from bridge: {0}")]
-    InvalidResponse(String),
-}
-
-struct BridgeConnection {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
-}
-
-impl BridgeConnection {
-    async fn connect(path: &PathBuf) -> Result<Self, BridgeError> {
-        let stream = UnixStream::connect(path).await?;
-        let (read_half, write_half) = stream.into_split();
-        Ok(Self {
-            reader: BufReader::new(read_half),
-            writer: write_half,
-        })
-    }
-}
-
-#[derive(Clone)]
-struct BridgeTransport {
-    socket_path: PathBuf,
-    session: String,
-    request_timeout: Duration,
-    next_id: Arc<AtomicU64>,
-    connection: Arc<Mutex<Option<BridgeConnection>>>,
-}
-
-impl BridgeTransport {
-    fn new(socket_path: PathBuf, session: String, request_timeout: Duration) -> Self {
-        Self {
-            socket_path,
-            session,
-            request_timeout,
-            next_id: Arc::new(AtomicU64::new(1)),
-            connection: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    fn next_message_id(&self) -> String {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        format!("msg-{id:04}")
-    }
-
-    async fn request(
-        &self,
-        msg_type: MessageType,
-        version: i64,
-        payload: Value,
-    ) -> Result<Message, BridgeError> {
-        let request = Message {
-            id: self.next_message_id(),
-            msg_type,
-            session: self.session.clone(),
-            version,
-            payload,
-        };
-
-        let line =
-            to_ndjson(&request).map_err(|err| BridgeError::InvalidResponse(err.to_string()))?;
-
-        let request_id = request.id.clone();
-
-        // Retry once after reconnecting if the bridge closes the socket mid-request.
-        for attempt in 0..2 {
-            let mut guard = self.connection.lock().await;
-            if guard.is_none() {
-                *guard = Some(BridgeConnection::connect(&self.socket_path).await?);
-            }
-
-            let mut should_retry = false;
-            if let Some(connection) = guard.as_mut() {
-                let io_result = tokio::time::timeout(self.request_timeout, async {
-                    connection.writer.write_all(line.as_bytes()).await?;
-                    connection.writer.flush().await?;
-                    loop {
-                        let mut response = String::new();
-                        let bytes_read = connection.reader.read_line(&mut response).await?;
-                        if bytes_read == 0 {
-                            return Ok::<Option<Message>, std::io::Error>(None);
-                        }
-
-                        let parsed = parse_message(response.trim_end()).map_err(|err| {
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
-                        })?;
-
-                        if parsed.id == request_id {
-                            return Ok(Some(parsed));
-                        }
-
-                        warn!(
-                            "ignoring bridge response with unexpected id: expected {}, got {}",
-                            request_id, parsed.id
-                        );
-                    }
-                })
-                .await;
-
-                match io_result {
-                    Ok(Ok(None)) => {
-                        *guard = None;
-                        if attempt == 0 {
-                            debug!("bridge returned EOF, reconnecting");
-                            should_retry = true;
-                        } else {
-                            return Err(BridgeError::Eof);
-                        }
-                    }
-                    Ok(Ok(Some(parsed))) => {
-                        return Ok(parsed);
-                    }
-                    Ok(Err(err)) => {
-                        if err.kind() == std::io::ErrorKind::InvalidData {
-                            return Err(BridgeError::InvalidResponse(err.to_string()));
-                        }
-
-                        *guard = None;
-                        if attempt == 0 {
-                            debug!("bridge I/O failed, reconnecting: {err}");
-                            should_retry = true;
-                        } else {
-                            return Err(BridgeError::Io(err));
-                        }
-                    }
-                    Err(_) => {
-                        *guard = None;
-                        if attempt == 0 {
-                            debug!(
-                                "bridge request timed out after {}ms, reconnecting",
-                                self.request_timeout.as_millis()
-                            );
-                            should_retry = true;
-                        } else {
-                            return Err(BridgeError::Timeout {
-                                timeout_ms: u64::try_from(self.request_timeout.as_millis())
-                                    .unwrap_or(u64::MAX),
-                            });
-                        }
-                    }
-                }
-            }
-
-            drop(guard);
-            if should_retry {
-                continue;
-            }
-        }
-
-        Err(BridgeError::Eof)
-    }
-}
-
 #[derive(Clone)]
 struct DocumentState {
     text: String,
     version: i64,
 }
 
-#[derive(Clone)]
-struct PendingPush {
-    uri: Url,
-    version: i64,
-    text: String,
-    queued_at: Instant,
-}
-
-enum PushEvent {
-    Update {
-        uri: Url,
-        version: i64,
-        text: String,
-    },
-    Flush {
-        uris: Option<Vec<Url>>,
-        respond_to: oneshot::Sender<()>,
-    },
-}
-
 struct IsabelleLanguageServer {
     client: Client,
     bridge: BridgeTransport,
     documents: Arc<RwLock<HashMap<Url, DocumentState>>>,
-    published_diagnostic_targets: Arc<RwLock<HashMap<Url, Vec<Url>>>>,
+    published_diagnostic_targets: PublishedDiagnosticTargets,
     session_running: Arc<RwLock<bool>>,
     push_tx: mpsc::UnboundedSender<PushEvent>,
 }
@@ -261,6 +80,7 @@ impl IsabelleLanguageServer {
             bridge.clone(),
             published_diagnostic_targets.clone(),
             session_running.clone(),
+            Duration::from_millis(DEFAULT_PUSH_DEBOUNCE_MS),
         );
 
         Self {
@@ -500,209 +320,7 @@ impl IsabelleLanguageServer {
     }
 }
 
-fn spawn_push_worker(
-    mut rx: mpsc::UnboundedReceiver<PushEvent>,
-    client: Client,
-    bridge: BridgeTransport,
-    published_diagnostic_targets: Arc<RwLock<HashMap<Url, Vec<Url>>>>,
-    session_running: Arc<RwLock<bool>>,
-) {
-    tokio::spawn(async move {
-        let mut pending_by_uri: HashMap<Url, PendingPush> = HashMap::new();
-        let mut flush_tick = tokio::time::interval(Duration::from_millis(50));
-        flush_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                event = rx.recv() => {
-                    match event {
-                        Some(PushEvent::Update { uri, version, text }) => {
-                            let queued_at = Instant::now();
-                            match pending_by_uri.get_mut(&uri) {
-                                Some(existing) if existing.version > version => {}
-                                Some(existing) => {
-                                    existing.version = version;
-                                    existing.text = text;
-                                    existing.queued_at = queued_at;
-                                }
-                                None => {
-                                    pending_by_uri.insert(uri.clone(), PendingPush { uri, version, text, queued_at });
-                                }
-                            }
-                        }
-                        Some(PushEvent::Flush { uris, respond_to }) => {
-                            let targets = match uris {
-                                Some(list) => list,
-                                None => pending_by_uri.keys().cloned().collect(),
-                            };
-                            for uri in targets {
-                                if let Some(pending) = pending_by_uri.remove(&uri)
-                                    && let Err(err) = send_document_push(
-                                        &bridge,
-                                        &client,
-                                        &published_diagnostic_targets,
-                                        &session_running,
-                                        &pending.uri,
-                                        pending.version,
-                                        pending.text,
-                                    )
-                                    .await
-                                {
-                                    log_error_for(&client, format!("failed to push document: {err}")).await;
-                                }
-                            }
-                            let _ = respond_to.send(());
-                        }
-                        None => break,
-                    }
-                }
-                _ = flush_tick.tick() => {
-                    let now = Instant::now();
-                    let ready = pending_by_uri
-                        .iter()
-                        .filter(|(_, pending)| now.duration_since(pending.queued_at) >= Duration::from_millis(DEFAULT_PUSH_DEBOUNCE_MS))
-                        .map(|(uri, _)| uri.clone())
-                        .collect::<Vec<_>>();
-
-                    for uri in ready {
-                        if let Some(pending) = pending_by_uri.remove(&uri)
-                            && let Err(err) = send_document_push(
-                                &bridge,
-                                &client,
-                                &published_diagnostic_targets,
-                                &session_running,
-                                &pending.uri,
-                                pending.version,
-                                pending.text,
-                            )
-                            .await
-                        {
-                            log_error_for(&client, format!("failed to push document: {err}")).await;
-                        }
-                    }
-                }
-            }
-        }
-    });
-}
-
-async fn send_document_push(
-    bridge: &BridgeTransport,
-    client: &Client,
-    published_diagnostic_targets: &Arc<RwLock<HashMap<Url, Vec<Url>>>>,
-    session_running: &Arc<RwLock<bool>>,
-    uri: &Url,
-    version: i64,
-    text: String,
-) -> Result<(), String> {
-    if !*session_running.read().await {
-        return Ok(());
-    }
-
-    let payload = serde_json::to_value(DocumentPushPayload {
-        uri: uri.to_string(),
-        text,
-    })
-    .map_err(|err| err.to_string())?;
-
-    let response = bridge
-        .request(MessageType::DocumentPush, version, payload)
-        .await
-        .map_err(|err| err.to_string())?;
-
-    publish_diagnostics_for(
-        client,
-        published_diagnostic_targets,
-        uri.clone(),
-        version,
-        response,
-    )
-    .await
-}
-
-async fn publish_diagnostics_for(
-    client: &Client,
-    published_diagnostic_targets: &Arc<RwLock<HashMap<Url, Vec<Url>>>>,
-    uri: Url,
-    version: i64,
-    response: Message,
-) -> Result<(), String> {
-    if response.msg_type != MessageType::Diagnostics {
-        return Err(format!(
-            "unexpected response type from bridge: {:?}",
-            response.msg_type
-        ));
-    }
-
-    let payload = response
-        .diagnostics_payload()
-        .map_err(|err| err.to_string())?;
-    let mut grouped: HashMap<Url, Vec<Diagnostic>> = HashMap::new();
-
-    for diagnostic in &payload {
-        let target_uri = match Url::parse(&diagnostic.uri) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                warn!(
-                    "bridge diagnostic had invalid uri '{}': {err}; publishing to request uri",
-                    diagnostic.uri
-                );
-                uri.clone()
-            }
-        };
-
-        grouped
-            .entry(target_uri)
-            .or_default()
-            .push(bridge_diagnostic_to_lsp(diagnostic));
-    }
-
-    grouped.entry(uri.clone()).or_default();
-
-    let current_targets = grouped.keys().cloned().collect::<Vec<_>>();
-    let stale_targets = {
-        let mut state = published_diagnostic_targets.write().await;
-        let previous = state.get(&uri).cloned().unwrap_or_default();
-        state.insert(uri.clone(), current_targets.clone());
-        previous
-    };
-
-    let current_target_set = current_targets.into_iter().collect::<HashSet<_>>();
-    let request_version = Some(i32::try_from(version).unwrap_or(i32::MAX));
-
-    for stale_uri in stale_targets {
-        if !current_target_set.contains(&stale_uri) {
-            let publish_version = if stale_uri == uri {
-                request_version
-            } else {
-                None
-            };
-            client
-                .publish_diagnostics(stale_uri, Vec::new(), publish_version)
-                .await;
-        }
-    }
-
-    for (target_uri, diagnostics) in grouped {
-        let publish_version = if target_uri == uri {
-            request_version
-        } else {
-            None
-        };
-        let params = PublishDiagnosticsParams {
-            uri: target_uri,
-            diagnostics,
-            version: publish_version,
-        };
-        client
-            .publish_diagnostics(params.uri, params.diagnostics, params.version)
-            .await;
-    }
-
-    Ok(())
-}
-
-async fn log_error_for(client: &Client, message: String) {
+pub(crate) async fn log_error_for(client: &Client, message: String) {
     error!("{message}");
     client.log_message(LspMessageType::ERROR, message).await;
 }
@@ -821,9 +439,11 @@ impl LanguageServer for IsabelleLanguageServer {
         let result = match command {
             COMMAND_START_SESSION => {
                 let start_result = self.start_session().await;
-                self.client
-                    .log_message(LspMessageType::INFO, "Isabelle session started")
-                    .await;
+                if start_result.is_ok() {
+                    self.client
+                        .log_message(LspMessageType::INFO, "Isabelle session started")
+                        .await;
+                }
                 start_result
             }
             COMMAND_STOP_SESSION => {
@@ -854,45 +474,6 @@ impl LanguageServer for IsabelleLanguageServer {
     }
 }
 
-fn bridge_diagnostic_to_lsp(diagnostic: &BridgeDiagnostic) -> Diagnostic {
-    Diagnostic {
-        range: bridge_range_to_lsp(&diagnostic.range),
-        severity: Some(bridge_severity_to_lsp(diagnostic.severity)),
-        message: diagnostic.message.clone(),
-        source: Some("isabelle".to_string()),
-        ..Diagnostic::default()
-    }
-}
-
-fn bridge_range_to_lsp(range: &bridge::protocol::Range) -> Range {
-    Range {
-        start: Position {
-            line: bridge_index_to_lsp(range.start.line),
-            character: bridge_index_to_lsp(range.start.col),
-        },
-        end: Position {
-            line: bridge_index_to_lsp(range.end.line),
-            character: bridge_index_to_lsp(range.end.col),
-        },
-    }
-}
-
-fn bridge_severity_to_lsp(severity: Severity) -> DiagnosticSeverity {
-    match severity {
-        Severity::Error => DiagnosticSeverity::ERROR,
-        Severity::Warning => DiagnosticSeverity::WARNING,
-        Severity::Info => DiagnosticSeverity::INFORMATION,
-    }
-}
-
-fn bridge_index_to_lsp(value: i64) -> u32 {
-    if value <= 1 {
-        return 0;
-    }
-
-    u32::try_from(value - 1).unwrap_or(u32::MAX)
-}
-
 fn command_target_uri(argument: Option<&Value>) -> Option<String> {
     let value = argument?;
     match value {
@@ -903,127 +484,6 @@ fn command_target_uri(argument: Option<&Value>) -> Option<String> {
             .map(str::to_string),
         _ => None,
     }
-}
-
-fn parse_autostart_command(command: &str) -> Result<(String, Vec<String>), String> {
-    let parts = split_shell_words(command).map_err(|err| err.to_string())?;
-    if parts.is_empty() {
-        return Err("autostart command is empty".to_string());
-    }
-
-    Ok((parts[0].clone(), parts[1..].to_vec()))
-}
-
-async fn autostart_bridge_if_needed(socket_path: &Path) -> Option<Child> {
-    if socket_path.exists() {
-        if socket_is_healthy(socket_path).await {
-            return None;
-        }
-
-        if let Err(err) = remove_stale_socket(socket_path) {
-            error!(
-                "failed to remove stale bridge socket {}: {err}",
-                socket_path.display()
-            );
-            return None;
-        }
-    }
-
-    let command = std::env::var(ENV_BRIDGE_AUTOSTART_CMD).ok()?;
-    if command.trim().is_empty() {
-        return None;
-    }
-
-    let (program, args) = match parse_autostart_command(&command) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            error!("invalid bridge autostart command: {err}");
-            return None;
-        }
-    };
-
-    info!("autostarting bridge via command: {} {:?}", program, args);
-    let child = match Command::new(&program)
-        .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(err) => {
-            error!("failed to autostart bridge: {err}");
-            return None;
-        }
-    };
-
-    let timeout_ms = std::env::var(ENV_BRIDGE_AUTOSTART_TIMEOUT_MS)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_BRIDGE_AUTOSTART_TIMEOUT_MS);
-
-    if !wait_for_socket(socket_path, Duration::from_millis(timeout_ms)).await {
-        warn!(
-            "bridge autostart command launched but socket {} was not ready within {}ms",
-            socket_path.display(),
-            timeout_ms
-        );
-    }
-
-    Some(child)
-}
-
-async fn socket_is_healthy(socket_path: &Path) -> bool {
-    match tokio::time::timeout(Duration::from_millis(200), UnixStream::connect(socket_path)).await {
-        Ok(Ok(stream)) => {
-            drop(stream);
-            true
-        }
-        Ok(Err(err)) => {
-            debug!(
-                "bridge socket {} is not connectable: {err}",
-                socket_path.display()
-            );
-            false
-        }
-        Err(_) => false,
-    }
-}
-
-fn remove_stale_socket(socket_path: &Path) -> Result<(), std::io::Error> {
-    let metadata = std::fs::symlink_metadata(socket_path)?;
-    #[cfg(unix)]
-    {
-        if metadata.file_type().is_socket() {
-            return std::fs::remove_file(socket_path);
-        }
-        Err(std::io::Error::new(
-            ErrorKind::AlreadyExists,
-            format!(
-                "refusing to remove non-socket path before autostart: {}",
-                socket_path.display()
-            ),
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = metadata;
-        Err(std::io::Error::new(
-            ErrorKind::Unsupported,
-            "non-unix platforms do not support unix socket cleanup",
-        ))
-    }
-}
-
-async fn wait_for_socket(socket_path: &Path, timeout: Duration) -> bool {
-    let start = tokio::time::Instant::now();
-    while start.elapsed() <= timeout {
-        if socket_path.exists() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    false
 }
 
 #[tokio::main]
@@ -1045,7 +505,13 @@ async fn main() {
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis)
         .unwrap_or_else(|| Duration::from_millis(DEFAULT_BRIDGE_REQUEST_TIMEOUT_MS));
-    let mut bridge_child = autostart_bridge_if_needed(&bridge_socket).await;
+    let mut bridge_child = autostart::autostart_bridge_if_needed(
+        &bridge_socket,
+        ENV_BRIDGE_AUTOSTART_CMD,
+        ENV_BRIDGE_AUTOSTART_TIMEOUT_MS,
+        DEFAULT_BRIDGE_AUTOSTART_TIMEOUT_MS,
+    )
+    .await;
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -1070,11 +536,16 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bridge::protocol::{Position, Range, diagnostics_message_from_request};
+    use bridge::protocol::{
+        Diagnostic as BridgeDiagnostic, Message, Position, Range, Severity,
+        diagnostics_message_from_request, parse_message, to_ndjson,
+    };
     use serde_json::json;
     use tempfile::tempdir;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
     use tokio::time::sleep;
+    use tower_lsp::lsp_types::DiagnosticSeverity;
 
     #[test]
     fn converts_bridge_diagnostic_to_lsp() {
@@ -1088,7 +559,7 @@ mod tests {
             message: "warning message".to_string(),
         };
 
-        let mapped = bridge_diagnostic_to_lsp(&diagnostic);
+        let mapped = diagnostics::bridge_diagnostic_to_lsp(&diagnostic);
         assert_eq!(mapped.severity, Some(DiagnosticSeverity::WARNING));
         assert_eq!(mapped.range.start.line, 0);
         assert_eq!(mapped.range.start.character, 1);
@@ -1259,7 +730,7 @@ mod tests {
 
     #[test]
     fn parses_autostart_command_with_quoted_arguments() {
-        let (program, args) = parse_autostart_command(
+        let (program, args) = autostart::parse_autostart_command(
             "bridge --socket /tmp/isabelle.sock --adapter-command \"bridge --mock-adapter\"",
         )
         .expect("command should parse");
@@ -1278,6 +749,6 @@ mod tests {
 
     #[test]
     fn rejects_empty_autostart_command() {
-        assert!(parse_autostart_command("   ").is_err());
+        assert!(autostart::parse_autostart_command("   ").is_err());
     }
 }

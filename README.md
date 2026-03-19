@@ -26,7 +26,7 @@ bridge 模式（集成测试/实验）：
 在仓库根目录（`<repo-root>`）执行：
 
 ```bash
-make install-zed-native
+cargo run -p isabelle-zed-xtask -- install-zed-native
 ```
 
 然后重启 Zed（或重载扩展）并打开 `.thy` 文件即可使用。
@@ -35,7 +35,7 @@ make install-zed-native
 如果仓库里缺少 `zed-extension/grammars/isabelle.wasm`，先执行：
 
 ```bash
-make build-isabelle-grammar
+cargo run -p isabelle-zed-xtask -- build-isabelle-grammar
 ```
 
 该安装命令会同时安装 Isabelle 专用快捷键（写入 `keymap.json`，带标记块）。
@@ -43,7 +43,7 @@ make build-isabelle-grammar
 卸载：
 
 ```bash
-make uninstall-zed-native
+cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 ```
 
 Windows 原生安装/卸载与 Linux/macOS 使用同一套 Rust 命令：
@@ -55,6 +55,8 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 
 说明：
 
+- 上述命令是 native 模式（直接调用 `isabelle vscode_server`），支持 Windows/Linux/macOS。
+- bridge 模式当前依赖 Unix Domain Socket（bridge + isabelle-zed-lsp），仅支持 Linux/macOS。
 - Windows 默认会安装快捷键；如需跳过，设置 `ISABELLE_ZED_SKIP_SHORTCUTS=1`。
 - 单独安装/卸载快捷键：
 
@@ -80,8 +82,8 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 单独安装/卸载快捷键：
 
 ```bash
-make install-zed-shortcuts
-make uninstall-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- install-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 ```
 
 补充任务（从任务面板运行）：
@@ -136,7 +138,7 @@ Bridge 模式的自动拉起说明：
 先运行预检查：
 
 ```bash
-make zed-official-check
+cargo run -p isabelle-zed-xtask -- zed-official-check
 ```
 
 然后按文档提交到 `zed-industries/extensions`：
@@ -155,34 +157,37 @@ version = "<version-from-zed-extension/extension.toml>"
 ### 本地辅助命令
 
 ```bash
-make doctor
-make install-local
-make release-build
-make release-package
+cargo run -p isabelle-zed-xtask -- doctor
+cargo run -p isabelle-zed-xtask -- install-local
+cargo run -p isabelle-zed-xtask -- release-build
+cargo run -p isabelle-zed-xtask -- release-package
 ```
 
 说明：
 
-- `make install-local` 默认安装二进制到 `~/.local/bin`。
+- `cargo run -p isabelle-zed-xtask -- install-local` 默认安装二进制到 `~/.local/bin`。
 - 可通过环境变量 `ISABELLE_ZED_BIN_DIR` 自定义安装路径。
 
 ### Bridge mock 集成测试
 
 ```bash
-make bridge-mock-up
-make mock-lsp-e2e
-make bridge-mock-down
+cargo run -p isabelle-zed-xtask -- bridge-mock-up
+cargo run -p isabelle-zed-xtask -- mock-lsp-e2e
+cargo run -p isabelle-zed-xtask -- bridge-mock-down
 ```
 
 ### Bridge 真实链路（adapter-command）
 
 bridge 默认真实模式会自动拉起内置 Rust adapter（无需 Scala / sbt）。
+当前 bridge / bridge-mode LSP 链路基于 Unix Domain Socket，仅支持 Unix（Linux/macOS）。
 
 你也可以显式指定自定义启动命令：
 
 ```bash
 bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
 ```
+
+`--adapter-command` 会按 argv 解析后直接执行（不经 `bash -lc`）。
 
 如果你希望 `isabelle-zed-lsp` 自动拉起 bridge，请在启动 Zed 前设置（示例）：
 
@@ -194,18 +199,18 @@ export ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS=10000
 ### 常用命令
 
 ```bash
-make bridge-test
-make lsp-test
-make zed-check
-make build-isabelle-grammar
-make native-lsp-smoke
-make spawn-e2e-ndjson
+cargo test -p isabelle-bridge
+cargo test -p isabelle-zed-lsp
+cargo check -p isabelle-zed-extension
+cargo run -p isabelle-zed-xtask -- build-isabelle-grammar
+cargo run -p isabelle-zed-xtask -- native-lsp-smoke
+cargo run -p isabelle-zed-xtask -- spawn-e2e-ndjson
 ```
 
 ### Release 说明
 
-- `make release-package` 会把根目录 `LICENSE` 一并打入发布包。
-- `make release-package` 会校验并打入 `zed-extension/grammars/isabelle.wasm`。
+- `cargo run -p isabelle-zed-xtask -- release-package` 会把根目录 `LICENSE` 一并打入发布包。
+- `cargo run -p isabelle-zed-xtask -- release-package` 会校验并打入 `zed-extension/grammars/isabelle.wasm`。
 - 发布版本号来自 `zed-extension/extension.toml` 的 `version` 字段。
 
 ## English
@@ -234,7 +239,7 @@ Project layout and structure conventions:
 From repository root (`<repo-root>`):
 
 ```bash
-make install-zed-native
+cargo run -p isabelle-zed-xtask -- install-zed-native
 ```
 
 Then restart Zed (or reload extensions) and open a `.thy` file.
@@ -243,7 +248,7 @@ Requirement: `isabelle` must be available on `PATH`.
 If `zed-extension/grammars/isabelle.wasm` is missing, run:
 
 ```bash
-make build-isabelle-grammar
+cargo run -p isabelle-zed-xtask -- build-isabelle-grammar
 ```
 
 This install command also installs Isabelle-specific shortcuts (inserted into `keymap.json` with marker comments).
@@ -251,7 +256,7 @@ This install command also installs Isabelle-specific shortcuts (inserted into `k
 Uninstall:
 
 ```bash
-make uninstall-zed-native
+cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 ```
 
 Windows uses the same Rust command entrypoints as Linux/macOS:
@@ -263,6 +268,8 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-native
 
 Notes:
 
+- The commands above target native mode (`isabelle vscode_server`) and work on Windows/Linux/macOS.
+- Bridge mode currently relies on Unix domain sockets (bridge + isabelle-zed-lsp), so it is Unix-only (Linux/macOS).
 - Shortcuts are installed by default; to skip, set `ISABELLE_ZED_SKIP_SHORTCUTS=1`.
 - Install/uninstall shortcuts only:
 
@@ -288,8 +295,8 @@ Installed default shortcuts:
 Install/uninstall shortcuts only:
 
 ```bash
-make install-zed-shortcuts
-make uninstall-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- install-zed-shortcuts
+cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 ```
 
 Extra tasks (run from the task palette):
@@ -344,7 +351,7 @@ Bridge autostart configuration note:
 Run pre-check first:
 
 ```bash
-make zed-official-check
+cargo run -p isabelle-zed-xtask -- zed-official-check
 ```
 
 Then follow:
@@ -363,34 +370,37 @@ version = "<version-from-zed-extension/extension.toml>"
 ### Local helper commands
 
 ```bash
-make doctor
-make install-local
-make release-build
-make release-package
+cargo run -p isabelle-zed-xtask -- doctor
+cargo run -p isabelle-zed-xtask -- install-local
+cargo run -p isabelle-zed-xtask -- release-build
+cargo run -p isabelle-zed-xtask -- release-package
 ```
 
 Notes:
 
-- `make install-local` installs binaries to `~/.local/bin` by default.
+- `cargo run -p isabelle-zed-xtask -- install-local` installs binaries to `~/.local/bin` by default.
 - Override with `ISABELLE_ZED_BIN_DIR` if needed.
 
 ### Bridge mock integration flow
 
 ```bash
-make bridge-mock-up
-make mock-lsp-e2e
-make bridge-mock-down
+cargo run -p isabelle-zed-xtask -- bridge-mock-up
+cargo run -p isabelle-zed-xtask -- mock-lsp-e2e
+cargo run -p isabelle-zed-xtask -- bridge-mock-down
 ```
 
 ### Bridge real-path startup (adapter-command)
 
 In real mode, bridge starts its built-in Rust adapter by default (no Scala / sbt dependency).
+The bridge / bridge-mode LSP path currently uses Unix domain sockets and is Unix-only (Linux/macOS).
 
 You can also provide an explicit startup command:
 
 ```bash
 bridge --socket /tmp/isabelle.sock --adapter-command "<your-adapter-cmd>"
 ```
+
+`--adapter-command` is parsed into argv and executed directly (without `bash -lc`).
 
 If you want `isabelle-zed-lsp` to autostart bridge, set these before launching Zed:
 
@@ -402,16 +412,16 @@ export ISABELLE_BRIDGE_AUTOSTART_TIMEOUT_MS=10000
 ### Common commands
 
 ```bash
-make bridge-test
-make lsp-test
-make zed-check
-make build-isabelle-grammar
-make native-lsp-smoke
-make spawn-e2e-ndjson
+cargo test -p isabelle-bridge
+cargo test -p isabelle-zed-lsp
+cargo check -p isabelle-zed-extension
+cargo run -p isabelle-zed-xtask -- build-isabelle-grammar
+cargo run -p isabelle-zed-xtask -- native-lsp-smoke
+cargo run -p isabelle-zed-xtask -- spawn-e2e-ndjson
 ```
 
 ### Release notes
 
-- `make release-package` now includes root `LICENSE` in the archive.
-- `make release-package` validates and includes `zed-extension/grammars/isabelle.wasm`.
+- `cargo run -p isabelle-zed-xtask -- release-package` now includes root `LICENSE` in the archive.
+- `cargo run -p isabelle-zed-xtask -- release-package` validates and includes `zed-extension/grammars/isabelle.wasm`.
 - Release version is read from `zed-extension/extension.toml` (`version`).

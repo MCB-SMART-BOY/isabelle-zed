@@ -65,7 +65,9 @@ pub(crate) fn bridge_mock_up(repo_root: &Path, socket: &Path) -> Result<()> {
         if let Ok(pid) = pid_raw.trim().parse::<i32>()
             && process_is_running(pid)
         {
-            bail!("bridge already running (pid={pid}). stop first: make bridge-mock-down");
+            bail!(
+                "bridge already running (pid={pid}). stop first: cargo run -p isabelle-zed-xtask -- bridge-mock-down"
+            );
         }
         let _ = fs::remove_file(&pid_file);
     }
@@ -91,28 +93,14 @@ pub(crate) fn bridge_mock_up(repo_root: &Path, socket: &Path) -> Result<()> {
     fs::write(&pid_file, format!("{pid}\n"))
         .with_context(|| format!("failed to write pid file: {}", pid_file.display()))?;
 
-    let deadline = Instant::now() + Duration::from_secs(12);
-    loop {
-        #[cfg(unix)]
-        let ready = socket
-            .symlink_metadata()
-            .map(|meta| meta.file_type().is_socket())
-            .unwrap_or(false);
-        #[cfg(not(unix))]
-        let ready = socket.exists();
-        if ready {
-            println!("bridge mock started");
-            println!("  pid:    {pid}");
-            println!("  socket: {}", socket.display());
-            println!("  log:    {}", log_file.display());
-            return Ok(());
-        }
+    wait_for_socket_ready(socket, Duration::from_secs(12))
+        .context("bridge started but socket was not ready in time")?;
 
-        if Instant::now() >= deadline {
-            bail!("bridge started but socket was not ready in time");
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+    println!("bridge mock started");
+    println!("  pid:    {pid}");
+    println!("  socket: {}", socket.display());
+    println!("  log:    {}", log_file.display());
+    Ok(())
 }
 
 pub(crate) fn bridge_mock_down(socket: &Path) -> Result<()> {

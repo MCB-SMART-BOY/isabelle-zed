@@ -3,6 +3,7 @@
 ## 中文（简体）
 
 `isabelle-zed-lsp` 是一个轻量 LSP 服务器，将标准 LSP 消息转换为 `bridge` 使用的 NDJSON 协议。
+该代理通过 Unix Domain Socket 与 bridge 通信，目前仅支持 Unix（Linux/macOS）。
 
 ### 主要映射
 
@@ -45,6 +46,7 @@ ISABELLE_BRIDGE_SOCKET=/tmp/isabelle.sock \
 ## English
 
 `isabelle-zed-lsp` is a lightweight LSP server that translates standard LSP messages into the bridge NDJSON protocol.
+It communicates with bridge over Unix domain sockets and is currently Unix-only (Linux/macOS).
 
 ### Message mapping
 

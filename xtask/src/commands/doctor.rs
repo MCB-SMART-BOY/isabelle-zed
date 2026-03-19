@@ -39,21 +39,27 @@ pub(crate) fn run(repo_root: &Path) -> Result<()> {
     if bridge_bin.is_file() {
         println!("[ok] bridge release binary is present");
     } else {
-        println!("[warn] bridge release binary not found (run: make release-build)");
+        println!(
+            "[warn] bridge release binary not found (run: cargo run -p isabelle-zed-xtask -- release-build)"
+        );
     }
 
     let lsp_bin = lsp_binary_path(repo_root, "release");
     if lsp_bin.is_file() {
         println!("[ok] isabelle-zed-lsp release binary is present");
     } else {
-        println!("[warn] isabelle-zed-lsp release binary not found (run: make release-build)");
+        println!(
+            "[warn] isabelle-zed-lsp release binary not found (run: cargo run -p isabelle-zed-xtask -- release-build)"
+        );
     }
 
     let extension_wasm = extension_wasm_path(repo_root, "release");
     if extension_wasm.is_file() {
         println!("[ok] extension wasm artifact is present");
     } else {
-        println!("[warn] extension wasm artifact not found (run: make release-build)");
+        println!(
+            "[warn] extension wasm artifact not found (run: cargo run -p isabelle-zed-xtask -- release-build)"
+        );
     }
 
     let grammar_wasm = repo_root.join("zed-extension/grammars/isabelle.wasm");
@@ -61,7 +67,7 @@ pub(crate) fn run(repo_root: &Path) -> Result<()> {
         println!("[ok] isabelle grammar wasm artifact is present");
     } else {
         println!(
-            "[warn] isabelle grammar wasm artifact not found (run: make build-isabelle-grammar)"
+            "[warn] isabelle grammar wasm artifact not found (run: cargo run -p isabelle-zed-xtask -- build-isabelle-grammar)"
         );
     }
 
