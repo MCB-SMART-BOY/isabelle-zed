@@ -163,6 +163,7 @@ jobs:
           python3 - <<'PY'
           import json
           import socket
+          import time
 
           req = {
               "id": "msg-0001",
@@ -176,13 +177,19 @@ jobs:
           }
 
           sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-          sock.settimeout(5.0)
+          sock.settimeout(1.0)
           sock.connect('/tmp/isabelle.sock')
           sock.sendall((json.dumps(req) + "\\n").encode())
 
           data = b''
+          deadline = time.time() + 30.0
           while not data.endswith(b"\\n"):
-              chunk = sock.recv(4096)
+              if time.time() >= deadline:
+                  raise TimeoutError("timed out waiting for bridge response")
+              try:
+                  chunk = sock.recv(4096)
+              except TimeoutError:
+                  continue
               if not chunk:
                   break
               data += chunk
@@ -441,6 +448,7 @@ jobs:
           python3 - <<'PY'
           import json
           import socket
+          import time
 
           req = {
               "id": "msg-0001",
@@ -454,13 +462,19 @@ jobs:
           }
 
           sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-          sock.settimeout(5.0)
+          sock.settimeout(1.0)
           sock.connect('/tmp/isabelle.sock')
           sock.sendall((json.dumps(req) + "\\n").encode())
 
           data = b''
+          deadline = time.time() + 30.0
           while not data.endswith(b"\\n"):
-              chunk = sock.recv(4096)
+              if time.time() >= deadline:
+                  raise TimeoutError("timed out waiting for bridge response")
+              try:
+                  chunk = sock.recv(4096)
+              except TimeoutError:
+                  continue
               if not chunk:
                   break
               data += chunk
