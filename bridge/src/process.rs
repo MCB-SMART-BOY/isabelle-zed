@@ -1,11 +1,13 @@
 use crate::protocol::{
     CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentUriPayload, LocationPayload,
     Message, MessageType, Position, QueryPayload, Range, RenamePayload, RenameResultPayload,
-    SemanticTokenPayload, Severity, SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
-    code_actions_message_from_request, completion_message_from_request,
-    diagnostics_message_from_request, location_message_from_request, markup_message_from_request,
-    parse_message, rename_message_from_request, semantic_tokens_message_from_request,
-    symbols_message_from_request, to_ndjson, workspace_symbols_message_from_request,
+    SemanticTokenPayload, Severity, SignatureHelpPayload, SymbolPayload, TextEditPayload,
+    WorkspaceSymbolQueryPayload, code_actions_message_from_request,
+    completion_message_from_request, diagnostics_message_from_request,
+    location_message_from_request, markup_message_from_request, parse_message,
+    rename_message_from_request, semantic_tokens_message_from_request,
+    signature_help_message_from_request, symbols_message_from_request, to_ndjson,
+    workspace_symbols_message_from_request,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -472,6 +474,8 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 workspace_symbols_message_from_request(&request, Vec::<SymbolPayload>::new())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
+            MessageType::SignatureHelp => signature_help_message_from_request(&request, None)
+                .map_err(|err| ProcessError::Protocol(err.to_string()))?,
             MessageType::Diagnostics => {
                 continue;
             }
@@ -826,6 +830,15 @@ impl RealAdapterState {
         tokens
     }
 
+    async fn signature_help(&self, uri: &str, offset: Position) -> Option<SignatureHelpPayload> {
+        let text = self.resolve_text(uri).await?;
+        signature_help_from_text(
+            &text,
+            normalize_one_based(offset.line),
+            normalize_one_based(offset.col),
+        )
+    }
+
     async fn rename_result(
         &self,
         uri: &str,
@@ -1158,6 +1171,13 @@ pub async fn run_real_adapter(
                         .map_err(|err| ProcessError::Protocol(err.to_string()))?;
                 let symbols = state.workspace_symbols(&payload.query).await;
                 workspace_symbols_message_from_request(&request, symbols)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::SignatureHelp => {
+                let payload: QueryPayload = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let help = state.signature_help(&payload.uri, payload.offset).await;
+                signature_help_message_from_request(&request, help)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::Diagnostics => {
@@ -1526,6 +1546,201 @@ fn build_hover_info(text: &str, line: usize, col: usize) -> String {
     }
 
     format!("Position: {line}:{col}\n{line_text}")
+}
+
+fn signature_help_from_text(text: &str, line: usize, col: usize) -> Option<SignatureHelpPayload> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let line_text = lines.get(line.saturating_sub(1))?;
+    signature_help_from_call(line_text, col).or_else(|| signature_help_from_keyword(line_text, col))
+}
+
+fn signature_help_from_call(line: &str, cursor_col: usize) -> Option<SignatureHelpPayload> {
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+
+    let cursor = cursor_col.saturating_sub(1).min(chars.len());
+    let mut open_stack = Vec::<usize>::new();
+    for (index, ch) in chars.iter().take(cursor).enumerate() {
+        match *ch {
+            '(' => open_stack.push(index),
+            ')' => {
+                open_stack.pop();
+            }
+            _ => {}
+        }
+    }
+    let open = *open_stack.last()?;
+
+    let mut name_end = open;
+    while name_end > 0 && chars[name_end - 1].is_whitespace() {
+        name_end -= 1;
+    }
+    let mut name_start = name_end;
+    while name_start > 0 && is_identifier_char(chars[name_start - 1]) {
+        name_start -= 1;
+    }
+    if name_start == name_end {
+        return None;
+    }
+
+    let callee = chars[name_start..name_end].iter().collect::<String>();
+    if callee.is_empty() {
+        return None;
+    }
+
+    let mut nested_depth = 0_i32;
+    let mut active_param = 0_usize;
+    for ch in chars.iter().take(cursor).skip(open + 1) {
+        match *ch {
+            '(' => nested_depth = nested_depth.saturating_add(1),
+            ')' => {
+                if nested_depth > 0 {
+                    nested_depth -= 1;
+                }
+            }
+            ',' if nested_depth == 0 => active_param = active_param.saturating_add(1),
+            _ => {}
+        }
+    }
+
+    Some(signature_help_payload_for_callee(&callee, active_param))
+}
+
+fn signature_help_from_keyword(line: &str, cursor_col: usize) -> Option<SignatureHelpPayload> {
+    let spans = identifier_tokens_by_line(line)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    if spans.is_empty() {
+        return None;
+    }
+
+    let cursor = cursor_col;
+    let mut token = spans
+        .iter()
+        .find(|(_, start, end)| cursor >= *start && cursor <= end.saturating_add(1))
+        .map(|(token, _, _)| token.as_str())
+        .or_else(|| {
+            spans
+                .iter()
+                .rev()
+                .find(|(_, _, end)| *end < cursor)
+                .map(|(token, _, _)| token.as_str())
+        })?;
+
+    if !is_signature_help_keyword(token)
+        && let Some((candidate, start, _)) = spans.first()
+        && *start <= cursor
+        && is_signature_help_keyword(candidate)
+    {
+        token = candidate;
+    }
+
+    let prefix = line
+        .chars()
+        .take(cursor.saturating_sub(1))
+        .collect::<String>();
+
+    match token {
+        "lemma" | "theorem" | "corollary" | "proposition" => {
+            let active = if prefix.contains(':') { 1 } else { 0 };
+            Some(signature_help_payload_from_template(
+                token,
+                vec!["name".to_string(), "statement".to_string()],
+                active,
+                Some(format!("{token} <name>: <statement>")),
+            ))
+        }
+        "definition" | "abbreviation" | "fun" | "function" | "primrec" => {
+            let active = if prefix.contains("where") { 1 } else { 0 };
+            Some(signature_help_payload_from_template(
+                token,
+                vec!["name".to_string(), "equation".to_string()],
+                active,
+                Some(format!("{token} <name> where <equation>")),
+            ))
+        }
+        "have" | "show" | "thus" | "hence" => Some(signature_help_payload_from_template(
+            token,
+            vec!["statement".to_string()],
+            0,
+            Some(format!("{token} <statement>")),
+        )),
+        _ => None,
+    }
+}
+
+fn is_signature_help_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "lemma"
+            | "theorem"
+            | "corollary"
+            | "proposition"
+            | "definition"
+            | "abbreviation"
+            | "fun"
+            | "function"
+            | "primrec"
+            | "have"
+            | "show"
+            | "thus"
+            | "hence"
+    )
+}
+
+fn signature_help_payload_for_callee(callee: &str, active_param: usize) -> SignatureHelpPayload {
+    match callee {
+        "lemma" | "theorem" | "corollary" | "proposition" => signature_help_payload_from_template(
+            callee,
+            vec!["name".to_string(), "statement".to_string()],
+            active_param,
+            Some(format!("{callee} <name>: <statement>")),
+        ),
+        "definition" | "abbreviation" | "fun" | "function" | "primrec" => {
+            signature_help_payload_from_template(
+                callee,
+                vec!["name".to_string(), "equation".to_string()],
+                active_param,
+                Some(format!("{callee} <name> where <equation>")),
+            )
+        }
+        _ => {
+            let count = active_param.saturating_add(1).clamp(1, 6);
+            let params = (1..=count)
+                .map(|index| format!("arg{index}"))
+                .collect::<Vec<_>>();
+            signature_help_payload_from_template(callee, params, active_param, None)
+        }
+    }
+}
+
+fn signature_help_payload_from_template(
+    callee: &str,
+    params: Vec<String>,
+    active_param: usize,
+    documentation: Option<String>,
+) -> SignatureHelpPayload {
+    let joined = params.join(", ");
+    let label = if joined.is_empty() {
+        callee.to_string()
+    } else {
+        format!("{callee}({joined})")
+    };
+
+    let bounded_active = if params.is_empty() {
+        0
+    } else {
+        active_param.min(params.len().saturating_sub(1))
+    };
+    SignatureHelpPayload {
+        label,
+        parameters: params,
+        active_parameter: i64::try_from(bounded_active).unwrap_or(0),
+        documentation,
+    }
 }
 
 const COMPLETION_KEYWORDS: &[&str] = &[
@@ -2118,6 +2333,25 @@ Unfinished session(s): Draft
         let labels = items.into_iter().map(|item| item.label).collect::<Vec<_>>();
         assert!(labels.contains(&"foo_bar".to_string()));
         assert!(labels.contains(&"fooz".to_string()));
+    }
+
+    #[test]
+    fn signature_help_from_text_tracks_active_parameter() {
+        let text = "theory Demo imports Main begin\nfoo(arg1, arg2)\nend\n";
+        let help = signature_help_from_text(text, 2, 11).expect("signature help should exist");
+        assert_eq!(help.active_parameter, 1);
+        assert!(help.label.starts_with("foo("));
+    }
+
+    #[test]
+    fn signature_help_from_text_supports_theorem_templates() {
+        let text = "theory Demo imports Main begin\nlemma demo: True\nend\n";
+        let help = signature_help_from_text(text, 2, 12).expect("keyword signature help");
+        assert_eq!(
+            help.parameters,
+            vec!["name".to_string(), "statement".to_string()]
+        );
+        assert_eq!(help.active_parameter, 1);
     }
 
     #[tokio::test]

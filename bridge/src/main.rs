@@ -339,9 +339,10 @@ fn pending_uri_for_message(message: &Message) -> Option<String> {
             .payload_as::<MarkupPayload>()
             .ok()
             .map(|payload| payload.uri),
-        MessageType::Definition | MessageType::References | MessageType::Completion => {
-            message.query_payload().ok().map(|payload| payload.uri)
-        }
+        MessageType::Definition
+        | MessageType::References
+        | MessageType::Completion
+        | MessageType::SignatureHelp => message.query_payload().ok().map(|payload| payload.uri),
         MessageType::Rename => message.rename_payload().ok().map(|payload| payload.uri),
         MessageType::DocumentSymbols => message
             .document_uri_payload()

@@ -73,3 +73,18 @@ fn rename_result_payload_decodes_warning() {
         Some("rename aborted: ambiguous symbol")
     );
 }
+
+#[test]
+fn signature_help_payload_decodes_optional_value() {
+    let raw = r#"{"id":"msg-0003","type":"signature_help","session":"s1","version":1,"payload":{"label":"lemma(name, statement)","parameters":["name","statement"],"active_parameter":1,"documentation":"lemma <name>: <statement>"}}"#;
+    let message = parse_message(raw).expect("signature_help payload should parse");
+    assert_eq!(message.msg_type, MessageType::SignatureHelp);
+
+    let payload = message
+        .signature_help_payload()
+        .expect("signature_help payload should decode")
+        .expect("signature_help should be present");
+    assert_eq!(payload.label, "lemma(name, statement)");
+    assert_eq!(payload.parameters.len(), 2);
+    assert_eq!(payload.active_parameter, 1);
+}

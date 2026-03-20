@@ -26,6 +26,8 @@ pub enum MessageType {
     SemanticTokens,
     #[serde(rename = "workspace.symbols")]
     WorkspaceSymbols,
+    #[serde(rename = "signature_help")]
+    SignatureHelp,
     #[serde(rename = "diagnostics")]
     Diagnostics,
     #[serde(rename = "markup")]
@@ -152,6 +154,16 @@ pub struct SemanticTokenPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct SignatureHelpPayload {
+    pub label: String,
+    pub parameters: Vec<String>,
+    pub active_parameter: i64,
+    #[serde(default)]
+    pub documentation: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Diagnostic {
     pub uri: String,
     pub range: Range,
@@ -265,6 +277,10 @@ impl Message {
     }
 
     pub fn semantic_tokens_payload(&self) -> Result<Vec<SemanticTokenPayload>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn signature_help_payload(&self) -> Result<Option<SignatureHelpPayload>, ProtocolError> {
         self.payload_as()
     }
 
@@ -425,5 +441,18 @@ pub fn workspace_symbols_message_from_request(
         session: request.session.clone(),
         version: request.version,
         payload: serde_json::to_value(symbols)?,
+    })
+}
+
+pub fn signature_help_message_from_request(
+    request: &Message,
+    signature_help: Option<SignatureHelpPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::SignatureHelp,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(signature_help)?,
     })
 }

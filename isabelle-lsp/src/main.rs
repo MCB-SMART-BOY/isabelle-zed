@@ -9,7 +9,8 @@ use bridge::protocol::{
     CodeActionPayload as BridgeCodeActionPayload, CompletionItemPayload, DocumentCheckPayload,
     DocumentUriPayload, LocationPayload, MarkupPayload, Message, MessageType,
     Position as BridgePosition, QueryPayload, RenamePayload, RenameResultPayload,
-    SemanticTokenPayload, SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
+    SemanticTokenPayload, SignatureHelpPayload as BridgeSignatureHelpPayload, SymbolPayload,
+    TextEditPayload, WorkspaceSymbolQueryPayload,
 };
 use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
 use push::{PushEvent, spawn_push_worker};
@@ -648,7 +649,32 @@ impl IsabelleLanguageServer {
         &self,
         uri: &Url,
         position: Position,
+        version: i64,
     ) -> Result<Option<SignatureHelp>, String> {
+        if self.is_session_running().await {
+            self.flush_pushes(Some(vec![uri.clone()])).await;
+            let bridge_payload = serde_json::to_value(QueryPayload {
+                uri: uri.to_string(),
+                offset: lsp_position_to_bridge(position),
+            })
+            .map_err(|err| err.to_string())?;
+
+            let response = self
+                .bridge
+                .request(MessageType::SignatureHelp, version, bridge_payload)
+                .await
+                .map_err(|err| err.to_string())?;
+
+            if response.msg_type == MessageType::SignatureHelp {
+                let payload = response
+                    .signature_help_payload()
+                    .map_err(|err| err.to_string())?;
+                if let Some(payload) = payload {
+                    return Ok(Some(bridge_signature_help_to_lsp(payload)));
+                }
+            }
+        }
+
         let text = self
             .document_snapshot(uri)
             .await
@@ -1144,8 +1170,16 @@ impl LanguageServer for IsabelleLanguageServer {
     ) -> JsonRpcResult<Option<SignatureHelp>> {
         let uri = params.text_document_position_params.text_document.uri;
         let position = params.text_document_position_params.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
 
-        match self.signature_help_for_position(&uri, position).await {
+        match self
+            .signature_help_for_position(&uri, position, version)
+            .await
+        {
             Ok(help) => Ok(help),
             Err(err) => {
                 self.log_error(format!("failed to compute signature help: {err}"))
@@ -2469,6 +2503,38 @@ fn bridge_semantic_tokens_to_lsp(tokens: Vec<SemanticTokenPayload>) -> SemanticT
     })
 }
 
+fn bridge_signature_help_to_lsp(payload: BridgeSignatureHelpPayload) -> SignatureHelp {
+    let parameter_count = payload.parameters.len();
+    let active_parameter = usize::try_from(payload.active_parameter.max(0)).unwrap_or(0);
+    let bounded_active = if parameter_count == 0 {
+        0
+    } else {
+        active_parameter.min(parameter_count.saturating_sub(1))
+    };
+
+    let parameters = payload
+        .parameters
+        .into_iter()
+        .map(|parameter| ParameterInformation {
+            label: ParameterLabel::Simple(parameter),
+            documentation: None,
+        })
+        .collect::<Vec<_>>();
+
+    SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label: payload.label,
+            documentation: payload
+                .documentation
+                .map(tower_lsp::lsp_types::Documentation::String),
+            parameters: Some(parameters),
+            active_parameter: Some(u32::try_from(bounded_active).unwrap_or(0)),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(u32::try_from(bounded_active).unwrap_or(0)),
+    }
+}
+
 fn default_bridge_endpoint() -> BridgeEndpoint {
     #[cfg(unix)]
     {
@@ -2705,6 +2771,20 @@ mod tests {
         assert_eq!(help.active_parameter, Some(1));
         assert_eq!(help.signatures.len(), 1);
         assert!(help.signatures[0].label.starts_with("foo("));
+    }
+
+    #[test]
+    fn bridge_signature_help_to_lsp_maps_payload() {
+        let payload = BridgeSignatureHelpPayload {
+            label: "lemma(name, statement)".to_string(),
+            parameters: vec!["name".to_string(), "statement".to_string()],
+            active_parameter: 1,
+            documentation: Some("lemma <name>: <statement>".to_string()),
+        };
+        let help = super::bridge_signature_help_to_lsp(payload);
+        assert_eq!(help.active_parameter, Some(1));
+        assert_eq!(help.signatures.len(), 1);
+        assert_eq!(help.signatures[0].label, "lemma(name, statement)");
     }
 
     #[test]
