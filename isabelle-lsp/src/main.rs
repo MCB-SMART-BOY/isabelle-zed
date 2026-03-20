@@ -28,13 +28,14 @@ use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions, CodeLensParams,
     Command, CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
-    CompletionResponse, DeclarationCapability, DocumentHighlight, DocumentHighlightKind,
-    DocumentHighlightParams, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
-    DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandOptions, FoldingRange,
-    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
-    ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions, InlayHintParams,
+    CompletionResponse, DeclarationCapability, DocumentFormattingParams, DocumentHighlight,
+    DocumentHighlightKind, DocumentHighlightParams, DocumentLink, DocumentLinkOptions,
+    DocumentLinkParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse,
+    ExecuteCommandOptions, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
+    FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverProviderCapability, ImplementationProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions, InlayHintParams,
     InlayHintServerCapabilities, Location, MarkedString, MessageType as LspMessageType, OneOf,
     ParameterInformation, ParameterLabel, Position, PrepareRenameResponse, Range as LspRange,
     ReferenceParams, RenameOptions, RenameParams, SelectionRange, SelectionRangeParams,
@@ -684,6 +685,47 @@ impl IsabelleLanguageServer {
         inlay_hints_from_text(&text, range)
     }
 
+    async fn document_formatting_edits_for_uri(
+        &self,
+        uri: &Url,
+        options: FormattingOptions,
+    ) -> Vec<TextEdit> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        document_formatting_edits(&text, &options)
+    }
+
+    async fn range_formatting_edits_for_uri(
+        &self,
+        uri: &Url,
+        range: LspRange,
+        options: FormattingOptions,
+    ) -> Vec<TextEdit> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        range_formatting_edits(&text, range, &options)
+    }
+
+    async fn on_type_formatting_edits_for_uri(
+        &self,
+        uri: &Url,
+        position: Position,
+        options: FormattingOptions,
+    ) -> Vec<TextEdit> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        on_type_formatting_edits(&text, position, &options)
+    }
+
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
         if !self.is_session_running().await {
             return Err("isabelle session is stopped".to_string());
@@ -813,6 +855,12 @@ impl LanguageServer for IsabelleLanguageServer {
                         resolve_provider: Some(false),
                     },
                 ))),
+                document_formatting_provider: Some(OneOf::Left(true)),
+                document_range_formatting_provider: Some(OneOf::Left(true)),
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "\n".to_string(),
+                    more_trigger_character: Some(vec![":".to_string(), ";".to_string()]),
+                }),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -1131,6 +1179,40 @@ impl LanguageServer for IsabelleLanguageServer {
         let uri = params.text_document.uri;
         Ok(Some(
             self.inlay_hints_for_uri_range(&uri, params.range).await,
+        ))
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> JsonRpcResult<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        Ok(Some(
+            self.document_formatting_edits_for_uri(&uri, params.options)
+                .await,
+        ))
+    }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> JsonRpcResult<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        Ok(Some(
+            self.range_formatting_edits_for_uri(&uri, params.range, params.options)
+                .await,
+        ))
+    }
+
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> JsonRpcResult<Option<Vec<TextEdit>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        Ok(Some(
+            self.on_type_formatting_edits_for_uri(&uri, position, params.options)
+                .await,
         ))
     }
 
@@ -1625,6 +1707,178 @@ fn inlay_hint_label_text(label: &InlayHintLabel) -> String {
         InlayHintLabel::String(value) => value.clone(),
         InlayHintLabel::LabelParts(parts) => parts.iter().map(|part| part.value.clone()).collect(),
     }
+}
+
+fn document_lines(text: &str) -> Vec<&str> {
+    let mut lines = text.split('\n').collect::<Vec<_>>();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        lines.push("");
+    }
+    lines
+}
+
+fn format_isabelle_text(text: &str, options: &FormattingOptions) -> String {
+    let indent_width = usize::try_from(options.tab_size.max(1)).unwrap_or(1);
+    let indent_unit = if options.insert_spaces {
+        " ".repeat(indent_width)
+    } else {
+        "\t".to_string()
+    };
+    let trim_trailing_whitespace = options.trim_trailing_whitespace.unwrap_or(false);
+
+    let mut indent_level = 0usize;
+    let mut formatted_lines = Vec::new();
+    for line in document_lines(text) {
+        let without_trailing = if trim_trailing_whitespace {
+            line.trim_end()
+        } else {
+            line
+        };
+        let trimmed = without_trailing.trim_start();
+        let tokens = line_identifier_tokens(trimmed);
+
+        if tokens
+            .first()
+            .is_some_and(|token| matches!(token.as_str(), "end" | "qed" | "oops"))
+        {
+            indent_level = indent_level.saturating_sub(1);
+        }
+
+        if trimmed.is_empty() {
+            formatted_lines.push(String::new());
+        } else {
+            let mut normalized = String::new();
+            for _ in 0..indent_level {
+                normalized.push_str(&indent_unit);
+            }
+            normalized.push_str(trimmed);
+            formatted_lines.push(normalized);
+        }
+
+        if tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "begin" | "proof"))
+        {
+            indent_level = indent_level.saturating_add(1);
+        }
+    }
+
+    let mut formatted = formatted_lines.join("\n");
+    if options.trim_final_newlines.unwrap_or(false) {
+        while formatted.ends_with('\n') {
+            formatted.pop();
+        }
+    }
+
+    let insert_final_newline = options.insert_final_newline.unwrap_or(text.ends_with('\n'));
+    if insert_final_newline && !formatted.ends_with('\n') {
+        formatted.push('\n');
+    }
+
+    formatted
+}
+
+fn document_formatting_edits(text: &str, options: &FormattingOptions) -> Vec<TextEdit> {
+    let formatted = format_isabelle_text(text, options);
+    if formatted == text {
+        return Vec::new();
+    }
+
+    vec![TextEdit {
+        range: full_document_range(text),
+        new_text: formatted,
+    }]
+}
+
+fn range_formatting_edits(
+    text: &str,
+    range: LspRange,
+    options: &FormattingOptions,
+) -> Vec<TextEdit> {
+    let formatted = format_isabelle_text(text, options);
+    if formatted == text {
+        return Vec::new();
+    }
+
+    let original_lines = document_lines(text);
+    let formatted_lines = document_lines(&formatted);
+    let start = usize::try_from(range.start.line).unwrap_or(usize::MAX);
+    if start >= original_lines.len() || start >= formatted_lines.len() {
+        return Vec::new();
+    }
+
+    let max_end = original_lines
+        .len()
+        .min(formatted_lines.len())
+        .saturating_sub(1);
+    let mut end = usize::try_from(range.end.line).unwrap_or(max_end);
+    if end > max_end {
+        end = max_end;
+    }
+    if end < start {
+        return Vec::new();
+    }
+
+    let original_chunk = original_lines[start..=end].join("\n");
+    let formatted_chunk = formatted_lines[start..=end].join("\n");
+    if original_chunk == formatted_chunk {
+        return Vec::new();
+    }
+
+    let start_line = u32::try_from(start).unwrap_or(0);
+    let end_line = u32::try_from(end).unwrap_or(u32::MAX);
+    let end_character = u32::try_from(original_lines[end].chars().count()).unwrap_or(u32::MAX);
+    vec![TextEdit {
+        range: LspRange {
+            start: Position {
+                line: start_line,
+                character: 0,
+            },
+            end: Position {
+                line: end_line,
+                character: end_character,
+            },
+        },
+        new_text: formatted_chunk,
+    }]
+}
+
+fn on_type_formatting_edits(
+    text: &str,
+    position: Position,
+    options: &FormattingOptions,
+) -> Vec<TextEdit> {
+    let formatted = format_isabelle_text(text, options);
+    if formatted == text {
+        return Vec::new();
+    }
+
+    let original_lines = document_lines(text);
+    let formatted_lines = document_lines(&formatted);
+    let line_index = usize::try_from(position.line).unwrap_or(usize::MAX);
+    if line_index >= original_lines.len() || line_index >= formatted_lines.len() {
+        return Vec::new();
+    }
+    if original_lines[line_index] == formatted_lines[line_index] {
+        return Vec::new();
+    }
+
+    let line = u32::try_from(line_index).unwrap_or(u32::MAX);
+    let end_character =
+        u32::try_from(original_lines[line_index].chars().count()).unwrap_or(u32::MAX);
+    vec![TextEdit {
+        range: LspRange {
+            start: Position { line, character: 0 },
+            end: Position {
+                line,
+                character: end_character,
+            },
+        },
+        new_text: formatted_lines[line_index].to_string(),
+    }]
 }
 
 fn folding_ranges_from_text(text: &str) -> Vec<FoldingRange> {
@@ -2299,6 +2553,7 @@ mod tests {
         Severity, diagnostics_message_from_request, parse_message, to_ndjson,
     };
     use serde_json::json;
+    use std::collections::HashMap;
     #[cfg(unix)]
     use tempfile::tempdir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2307,6 +2562,17 @@ mod tests {
     #[cfg(unix)]
     use tokio::time::sleep;
     use tower_lsp::lsp_types::DiagnosticSeverity;
+
+    fn formatting_options() -> FormattingOptions {
+        FormattingOptions {
+            tab_size: 2,
+            insert_spaces: true,
+            properties: HashMap::new(),
+            trim_trailing_whitespace: Some(true),
+            insert_final_newline: Some(true),
+            trim_final_newlines: Some(true),
+        }
+    }
 
     #[test]
     fn converts_bridge_diagnostic_to_lsp() {
@@ -2529,6 +2795,66 @@ mod tests {
 
         assert!(labels.iter().any(|label| label == "method: "));
         assert!(!labels.iter().any(|label| label == " : proposition"));
+    }
+
+    #[test]
+    fn format_isabelle_text_indents_theory_and_proof_blocks() {
+        let text =
+            "theory Demo imports Main begin\nlemma t: True\nproof\nshow True by simp\nqed\nend\n";
+        let formatted = super::format_isabelle_text(text, &formatting_options());
+        let expected = "theory Demo imports Main begin\n  lemma t: True\n  proof\n    show True by simp\n  qed\nend\n";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn document_formatting_edits_rewrite_entire_document() {
+        let text =
+            "theory Demo imports Main begin\nlemma t: True\nproof\nshow True by simp\nqed\nend\n";
+        let edits = super::document_formatting_edits(text, &formatting_options());
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range, super::full_document_range(text));
+        assert!(edits[0].new_text.contains("\n  lemma t: True\n"));
+    }
+
+    #[test]
+    fn range_formatting_edits_limit_to_requested_lines() {
+        let text =
+            "theory Demo imports Main begin\nlemma t: True\nproof\nshow True by simp\nqed\nend\n";
+        let edits = super::range_formatting_edits(
+            text,
+            LspRange {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 12,
+                },
+            },
+            &formatting_options(),
+        );
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.start.line, 1);
+        assert_eq!(edits[0].range.end.line, 1);
+        assert_eq!(edits[0].new_text, "  lemma t: True");
+    }
+
+    #[test]
+    fn on_type_formatting_edits_update_current_line_only() {
+        let text = "theory Demo imports Main begin\nlemma t: True\nend\n";
+        let edits = super::on_type_formatting_edits(
+            text,
+            Position {
+                line: 1,
+                character: 5,
+            },
+            &formatting_options(),
+        );
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.start.line, 1);
+        assert_eq!(edits[0].range.end.line, 1);
+        assert_eq!(edits[0].new_text, "  lemma t: True");
     }
 
     #[cfg(unix)]
