@@ -10,7 +10,7 @@ use crate::protocol::{
 use regex::Regex;
 use serde::Deserialize;
 use shell_words::split as split_shell_words;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -919,12 +919,14 @@ impl RealAdapterState {
             .iter()
             .map(|(uri, cached)| (uri.clone(), cached.text.clone()))
             .collect::<Vec<_>>();
-        if docs.iter().any(|(uri, _)| uri == focus_uri) {
-            return docs;
+        if !docs.iter().any(|(uri, _)| uri == focus_uri)
+            && let Some(text) = read_document_from_uri(focus_uri).await
+        {
+            docs.push((focus_uri.to_string(), text));
         }
 
-        if let Some(text) = read_document_from_uri(focus_uri).await {
-            docs.push((focus_uri.to_string(), text));
+        if let Some(related_uris) = related_document_uris(&docs, focus_uri) {
+            docs.retain(|(uri, _)| related_uris.contains(uri));
         }
         docs
     }
@@ -1208,6 +1210,178 @@ fn extract_theory_name(text: &str) -> Option<String> {
     theory_regex
         .captures(text)
         .and_then(|captures| captures.get(1).map(|value| value.as_str().to_string()))
+}
+
+#[derive(Debug, Clone)]
+struct TheoryHeader {
+    name: String,
+    imports: Vec<String>,
+}
+
+fn theory_header(text: &str) -> Option<TheoryHeader> {
+    let mut theory_name: Option<String> = None;
+    let mut imports = Vec::new();
+    let mut collecting_imports = false;
+
+    for line in text.lines() {
+        let tokens = identifier_tokens_in_line(line)
+            .into_iter()
+            .map(|(token, _, _)| token)
+            .collect::<Vec<_>>();
+        if tokens.is_empty() {
+            continue;
+        }
+
+        if theory_name.is_none() {
+            if tokens.first().map(String::as_str) != Some("theory") {
+                continue;
+            }
+
+            if let Some(candidate) = tokens.get(1) {
+                let sanitized = sanitize_theory_name(candidate);
+                if !sanitized.is_empty() {
+                    theory_name = Some(sanitized);
+                }
+            }
+
+            if let Some(imports_index) = tokens.iter().position(|token| token == "imports") {
+                push_import_tokens(&tokens[imports_index + 1..], &mut imports);
+                collecting_imports = !tokens.iter().any(|token| token == "begin");
+            } else if tokens.iter().any(|token| token == "begin") {
+                break;
+            }
+            continue;
+        }
+
+        if collecting_imports {
+            if let Some(begin_index) = tokens.iter().position(|token| token == "begin") {
+                push_import_tokens(&tokens[..begin_index], &mut imports);
+                break;
+            }
+            push_import_tokens(&tokens, &mut imports);
+            continue;
+        }
+
+        if tokens.first().map(String::as_str) == Some("imports") {
+            if let Some(begin_index) = tokens.iter().position(|token| token == "begin") {
+                push_import_tokens(&tokens[1..begin_index], &mut imports);
+                break;
+            }
+            push_import_tokens(&tokens[1..], &mut imports);
+            collecting_imports = true;
+            continue;
+        }
+
+        if tokens.first().map(String::as_str) == Some("begin") {
+            break;
+        }
+    }
+
+    let theory_name = theory_name.or_else(|| {
+        extract_theory_name(text).and_then(|candidate| {
+            let sanitized = sanitize_theory_name(&candidate);
+            if sanitized.is_empty() {
+                None
+            } else {
+                Some(sanitized)
+            }
+        })
+    })?;
+
+    imports.sort();
+    imports.dedup();
+    Some(TheoryHeader {
+        name: theory_name,
+        imports,
+    })
+}
+
+fn push_import_tokens(tokens: &[String], imports: &mut Vec<String>) {
+    for token in tokens {
+        if token == "begin" {
+            break;
+        }
+        if token == "imports" {
+            continue;
+        }
+
+        let sanitized = sanitize_theory_name(token);
+        if sanitized.is_empty() {
+            continue;
+        }
+        imports.push(sanitized);
+    }
+}
+
+fn related_document_uris(docs: &[(String, String)], focus_uri: &str) -> Option<HashSet<String>> {
+    let mut theory_to_uri = HashMap::new();
+    let mut imports_by_theory = HashMap::new();
+    let mut theory_for_uri = HashMap::new();
+
+    for (uri, text) in docs {
+        let Some(header) = theory_header(text) else {
+            continue;
+        };
+        theory_for_uri.insert(uri.clone(), header.name.clone());
+        theory_to_uri
+            .entry(header.name.clone())
+            .or_insert_with(|| uri.clone());
+        imports_by_theory.insert(header.name, header.imports);
+    }
+
+    let focus_theory = theory_for_uri.get(focus_uri).cloned().or_else(|| {
+        theory_name_from_uri(focus_uri).and_then(|name| {
+            let sanitized = sanitize_theory_name(&name);
+            if sanitized.is_empty() {
+                None
+            } else {
+                Some(sanitized)
+            }
+        })
+    })?;
+    if !theory_to_uri.contains_key(&focus_theory) {
+        return None;
+    }
+
+    let mut adjacency = HashMap::<String, HashSet<String>>::new();
+    for (theory, imports) in &imports_by_theory {
+        for imported in imports {
+            if !theory_to_uri.contains_key(imported) {
+                continue;
+            }
+            adjacency
+                .entry(theory.clone())
+                .or_default()
+                .insert(imported.clone());
+            adjacency
+                .entry(imported.clone())
+                .or_default()
+                .insert(theory.clone());
+        }
+    }
+
+    let mut reachable_theories = HashSet::new();
+    let mut stack = vec![focus_theory];
+    while let Some(current) = stack.pop() {
+        if !reachable_theories.insert(current.clone()) {
+            continue;
+        }
+        if let Some(neighbors) = adjacency.get(&current) {
+            for neighbor in neighbors {
+                if !reachable_theories.contains(neighbor) {
+                    stack.push(neighbor.clone());
+                }
+            }
+        }
+    }
+
+    let mut uris = HashSet::from([focus_uri.to_string()]);
+    for theory in reachable_theories {
+        if let Some(uri) = theory_to_uri.get(&theory) {
+            uris.insert(uri.clone());
+        }
+    }
+    Some(uris)
 }
 
 fn theory_name_from_uri(uri: &str) -> Option<String> {
@@ -1666,6 +1840,41 @@ Unfinished session(s): Draft
     }
 
     #[test]
+    fn theory_header_collects_multiline_imports() {
+        let text = "theory Demo\nimports Main A B\nbegin\nend\n";
+        let header = theory_header(text).expect("theory header should parse");
+        assert_eq!(header.name, "Demo");
+        assert_eq!(
+            header.imports,
+            vec!["A".to_string(), "B".to_string(), "Main".to_string()]
+        );
+    }
+
+    #[test]
+    fn related_document_uris_returns_connected_theories_only() {
+        let docs = vec![
+            (
+                "file:///tmp/A.thy".to_string(),
+                "theory A imports Main begin\nlemma a: True by simp\nend\n".to_string(),
+            ),
+            (
+                "file:///tmp/B.thy".to_string(),
+                "theory B imports A begin\nlemma b: a by simp\nend\n".to_string(),
+            ),
+            (
+                "file:///tmp/C.thy".to_string(),
+                "theory C imports Main begin\nlemma a: True by simp\nend\n".to_string(),
+            ),
+        ];
+
+        let related = related_document_uris(&docs, "file:///tmp/B.thy")
+            .expect("connected theory set should resolve");
+        assert!(related.contains("file:///tmp/A.thy"));
+        assert!(related.contains("file:///tmp/B.thy"));
+        assert!(!related.contains("file:///tmp/C.thy"));
+    }
+
+    #[test]
     fn parse_adapter_command_parses_and_validates() {
         let parsed =
             parse_adapter_command("bridge --mock-adapter").expect("adapter command should parse");
@@ -1840,7 +2049,7 @@ Unfinished session(s): Draft
         state.latest_documents.insert(
             uri_b.to_string(),
             CachedDocument {
-                text: "theory B imports Main begin\nlemma uses_foo: foo by simp\nend\n".to_string(),
+                text: "theory B imports A begin\nlemma uses_foo: foo by simp\nend\n".to_string(),
                 version: 1,
                 diagnostics: Vec::new(),
             },
@@ -1854,7 +2063,7 @@ Unfinished session(s): Draft
     }
 
     #[tokio::test]
-    async fn rename_edits_include_all_cached_documents() {
+    async fn rename_edits_include_related_cached_documents() {
         let uri_a = "file:///tmp/A.thy";
         let uri_b = "file:///tmp/B.thy";
         let mut state =
@@ -1870,7 +2079,7 @@ Unfinished session(s): Draft
         state.latest_documents.insert(
             uri_b.to_string(),
             CachedDocument {
-                text: "theory B imports Main begin\nlemma uses_foo: foo by simp\nend\n".to_string(),
+                text: "theory B imports A begin\nlemma uses_foo: foo by simp\nend\n".to_string(),
                 version: 1,
                 diagnostics: Vec::new(),
             },
@@ -1881,6 +2090,46 @@ Unfinished session(s): Draft
             .await;
         assert!(edits.iter().any(|edit| edit.uri == uri_a));
         assert!(edits.iter().any(|edit| edit.uri == uri_b));
+    }
+
+    #[tokio::test]
+    async fn reference_locations_excludes_unrelated_documents() {
+        let uri_a = "file:///tmp/A.thy";
+        let uri_b = "file:///tmp/B.thy";
+        let uri_c = "file:///tmp/C.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri_a.to_string(),
+            CachedDocument {
+                text: "theory A imports Main begin\nlemma foo: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_b.to_string(),
+            CachedDocument {
+                text: "theory B imports A begin\nlemma uses_foo: foo by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_c.to_string(),
+            CachedDocument {
+                text: "theory C imports Main begin\nlemma foo: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let locations = state
+            .reference_locations(uri_b, Position { line: 2, col: 17 })
+            .await;
+        assert!(locations.iter().any(|location| location.uri == uri_a));
+        assert!(locations.iter().any(|location| location.uri == uri_b));
+        assert!(!locations.iter().any(|location| location.uri == uri_c));
     }
 
     #[tokio::test]
