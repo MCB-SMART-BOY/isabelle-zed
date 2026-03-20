@@ -88,3 +88,19 @@ fn signature_help_payload_decodes_optional_value() {
     assert_eq!(payload.parameters.len(), 2);
     assert_eq!(payload.active_parameter, 1);
 }
+
+#[test]
+fn document_links_payload_decodes_array() {
+    let raw = r#"{"id":"msg-0004","type":"document_links","session":"s1","version":1,"payload":[{"range":{"start":{"line":1,"col":6},"end":{"line":1,"col":18}},"target":"https://isabelle.in.tum.de","tooltip":"Open external link"}]}"#;
+    let message = parse_message(raw).expect("document_links payload should parse");
+    assert_eq!(message.msg_type, MessageType::DocumentLinks);
+
+    let payload = message
+        .document_links_payload()
+        .expect("document_links payload should decode");
+    assert_eq!(payload.len(), 1);
+    assert_eq!(
+        payload[0].target.as_deref(),
+        Some("https://isabelle.in.tum.de")
+    );
+}

@@ -7,10 +7,10 @@ mod transport;
 use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
     CodeActionPayload as BridgeCodeActionPayload, CompletionItemPayload, DocumentCheckPayload,
-    DocumentUriPayload, LocationPayload, MarkupPayload, Message, MessageType,
-    Position as BridgePosition, QueryPayload, RenamePayload, RenameResultPayload,
-    SemanticTokenPayload, SignatureHelpPayload as BridgeSignatureHelpPayload, SymbolPayload,
-    TextEditPayload, WorkspaceSymbolQueryPayload,
+    DocumentLinkPayload as BridgeDocumentLinkPayload, DocumentUriPayload, LocationPayload,
+    MarkupPayload, Message, MessageType, Position as BridgePosition, QueryPayload, RenamePayload,
+    RenameResultPayload, SemanticTokenPayload, SignatureHelpPayload as BridgeSignatureHelpPayload,
+    SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
 };
 use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
 use push::{PushEvent, spawn_push_worker};
@@ -683,7 +683,36 @@ impl IsabelleLanguageServer {
         Ok(signature_help_from_text(&text, position))
     }
 
-    async fn document_links_for_uri(&self, uri: &Url) -> Result<Vec<DocumentLink>, String> {
+    async fn document_links_for_uri(
+        &self,
+        uri: &Url,
+        version: i64,
+    ) -> Result<Vec<DocumentLink>, String> {
+        if self.is_session_running().await {
+            self.flush_pushes(Some(vec![uri.clone()])).await;
+
+            let payload = serde_json::to_value(DocumentUriPayload {
+                uri: uri.to_string(),
+            })
+            .map_err(|err| err.to_string())?;
+
+            let response = self
+                .bridge
+                .request(MessageType::DocumentLinks, version, payload)
+                .await
+                .map_err(|err| err.to_string())?;
+
+            if response.msg_type == MessageType::DocumentLinks {
+                let links = response
+                    .document_links_payload()
+                    .map_err(|err| err.to_string())?;
+                return Ok(links
+                    .into_iter()
+                    .filter_map(bridge_document_link_to_lsp)
+                    .collect());
+            }
+        }
+
         let text = self
             .document_snapshot(uri)
             .await
@@ -1194,7 +1223,12 @@ impl LanguageServer for IsabelleLanguageServer {
         params: DocumentLinkParams,
     ) -> JsonRpcResult<Option<Vec<DocumentLink>>> {
         let uri = params.text_document.uri;
-        match self.document_links_for_uri(&uri).await {
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+        match self.document_links_for_uri(&uri, version).await {
             Ok(links) => Ok(Some(links)),
             Err(err) => {
                 self.log_error(format!("failed to compute document links: {err}"))
@@ -2503,6 +2537,18 @@ fn bridge_semantic_tokens_to_lsp(tokens: Vec<SemanticTokenPayload>) -> SemanticT
     })
 }
 
+fn bridge_document_link_to_lsp(payload: BridgeDocumentLinkPayload) -> Option<DocumentLink> {
+    let target = payload.target.and_then(|value| Url::parse(&value).ok());
+    target.as_ref()?;
+
+    Some(DocumentLink {
+        range: bridge_range_to_lsp(payload.range),
+        target,
+        tooltip: payload.tooltip,
+        data: None,
+    })
+}
+
 fn bridge_signature_help_to_lsp(payload: BridgeSignatureHelpPayload) -> SignatureHelp {
     let parameter_count = payload.parameters.len();
     let active_parameter = usize::try_from(payload.active_parameter.max(0)).unwrap_or(0);
@@ -2785,6 +2831,26 @@ mod tests {
         assert_eq!(help.active_parameter, Some(1));
         assert_eq!(help.signatures.len(), 1);
         assert_eq!(help.signatures[0].label, "lemma(name, statement)");
+    }
+
+    #[test]
+    fn bridge_document_link_to_lsp_maps_target_and_range() {
+        let link = super::bridge_document_link_to_lsp(BridgeDocumentLinkPayload {
+            range: bridge::protocol::Range {
+                start: BridgePosition { line: 1, col: 6 },
+                end: BridgePosition { line: 1, col: 18 },
+            },
+            target: Some("https://isabelle.in.tum.de".to_string()),
+            tooltip: Some("Open external link".to_string()),
+        })
+        .expect("document link should map");
+
+        assert_eq!(link.range.start.line, 0);
+        assert_eq!(link.range.start.character, 5);
+        assert_eq!(
+            link.target.as_ref().map(Url::as_str),
+            Some("https://isabelle.in.tum.de/")
+        );
     }
 
     #[test]

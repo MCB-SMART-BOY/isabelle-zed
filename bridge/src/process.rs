@@ -1,13 +1,13 @@
 use crate::protocol::{
-    CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentUriPayload, LocationPayload,
-    Message, MessageType, Position, QueryPayload, Range, RenamePayload, RenameResultPayload,
-    SemanticTokenPayload, Severity, SignatureHelpPayload, SymbolPayload, TextEditPayload,
-    WorkspaceSymbolQueryPayload, code_actions_message_from_request,
+    CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentLinkPayload, DocumentUriPayload,
+    LocationPayload, Message, MessageType, Position, QueryPayload, Range, RenamePayload,
+    RenameResultPayload, SemanticTokenPayload, Severity, SignatureHelpPayload, SymbolPayload,
+    TextEditPayload, WorkspaceSymbolQueryPayload, code_actions_message_from_request,
     completion_message_from_request, diagnostics_message_from_request,
-    location_message_from_request, markup_message_from_request, parse_message,
-    rename_message_from_request, semantic_tokens_message_from_request,
-    signature_help_message_from_request, symbols_message_from_request, to_ndjson,
-    workspace_symbols_message_from_request,
+    document_links_message_from_request, location_message_from_request,
+    markup_message_from_request, parse_message, rename_message_from_request,
+    semantic_tokens_message_from_request, signature_help_message_from_request,
+    symbols_message_from_request, to_ndjson, workspace_symbols_message_from_request,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -476,6 +476,10 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
             }
             MessageType::SignatureHelp => signature_help_message_from_request(&request, None)
                 .map_err(|err| ProcessError::Protocol(err.to_string()))?,
+            MessageType::DocumentLinks => {
+                document_links_message_from_request(&request, Vec::<DocumentLinkPayload>::new())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
             MessageType::Diagnostics => {
                 continue;
             }
@@ -839,6 +843,13 @@ impl RealAdapterState {
         )
     }
 
+    async fn document_links(&self, uri: &str) -> Vec<DocumentLinkPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+        document_links_from_text(uri, &text)
+    }
+
     async fn rename_result(
         &self,
         uri: &str,
@@ -1178,6 +1189,14 @@ pub async fn run_real_adapter(
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?;
                 let help = state.signature_help(&payload.uri, payload.offset).await;
                 signature_help_message_from_request(&request, help)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::DocumentLinks => {
+                let payload: DocumentUriPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let links = state.document_links(&payload.uri).await;
+                document_links_message_from_request(&request, links)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::Diagnostics => {
@@ -1743,6 +1762,163 @@ fn signature_help_payload_from_template(
     }
 }
 
+fn document_links_from_text(uri: &str, text: &str) -> Vec<DocumentLinkPayload> {
+    let base_dir = Url::parse(uri)
+        .ok()
+        .and_then(|parsed| parsed.to_file_path().ok())
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+    let mut links = Vec::new();
+
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = u32::try_from(line_index).unwrap_or(u32::MAX);
+
+        for (start, end, target) in http_links_in_line(line) {
+            if Url::parse(&target).is_err() {
+                continue;
+            }
+            links.push(DocumentLinkPayload {
+                range: bridge_range_from_line_chars(line_number, start, end),
+                target: Some(target),
+                tooltip: Some("Open external link".to_string()),
+            });
+        }
+
+        if let Some(base) = &base_dir {
+            for (name, start, end) in import_tokens_in_line(line) {
+                if let Some(target) = resolve_import_target(base, &name) {
+                    links.push(DocumentLinkPayload {
+                        range: bridge_range_from_line_chars(line_number, start, end),
+                        target: Some(target),
+                        tooltip: Some(format!("Open imported theory `{name}`")),
+                    });
+                }
+            }
+        }
+    }
+
+    links.sort_by(|a, b| {
+        let a_target = a.target.as_deref().unwrap_or_default().to_string();
+        let b_target = b.target.as_deref().unwrap_or_default().to_string();
+        a.range
+            .start
+            .line
+            .cmp(&b.range.start.line)
+            .then_with(|| a.range.start.col.cmp(&b.range.start.col))
+            .then_with(|| a.range.end.line.cmp(&b.range.end.line))
+            .then_with(|| a.range.end.col.cmp(&b.range.end.col))
+            .then_with(|| a_target.cmp(&b_target))
+    });
+    links.dedup_by(|a, b| {
+        a.range == b.range
+            && a.target.as_deref().unwrap_or_default() == b.target.as_deref().unwrap_or_default()
+    });
+    links
+}
+
+fn bridge_range_from_line_chars(line: u32, start_char: u32, end_char: u32) -> Range {
+    Range {
+        start: Position {
+            line: i64::from(line.saturating_add(1)),
+            col: i64::from(start_char.saturating_add(1)),
+        },
+        end: Position {
+            line: i64::from(line.saturating_add(1)),
+            col: i64::from(end_char.saturating_add(1)),
+        },
+    }
+}
+
+fn http_links_in_line(line: &str) -> Vec<(u32, u32, String)> {
+    let mut links = Vec::new();
+    let bytes = line.as_bytes();
+    let mut start_byte = 0usize;
+
+    while start_byte < bytes.len() {
+        let candidate = &line[start_byte..];
+        let relative = if let Some(index) = candidate.find("https://") {
+            Some(index)
+        } else {
+            candidate.find("http://")
+        };
+        let Some(relative_index) = relative else {
+            break;
+        };
+        let absolute_start = start_byte.saturating_add(relative_index);
+        let remainder = &line[absolute_start..];
+        let end_offset = remainder
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | ')' | ']' | '>'))
+            .unwrap_or(remainder.len());
+        let absolute_end = absolute_start.saturating_add(end_offset);
+
+        let target = line[absolute_start..absolute_end].to_string();
+        let start = u32::try_from(line[..absolute_start].chars().count()).unwrap_or(0);
+        let end = u32::try_from(line[..absolute_end].chars().count()).unwrap_or(start);
+        if end > start {
+            links.push((start, end, target));
+        }
+        start_byte = absolute_end.saturating_add(1);
+    }
+
+    links
+}
+
+fn import_tokens_in_line(line: &str) -> Vec<(String, u32, u32)> {
+    let spans = line_identifier_spans(line);
+    let Some(imports_index) = spans.iter().position(|(token, _, _)| token == "imports") else {
+        return Vec::new();
+    };
+
+    spans
+        .into_iter()
+        .skip(imports_index + 1)
+        .take_while(|(token, _, _)| token != "begin")
+        .collect()
+}
+
+fn resolve_import_target(base_dir: &std::path::Path, theory_name: &str) -> Option<String> {
+    let direct = base_dir.join(format!("{theory_name}.thy"));
+    if direct.is_file() {
+        return Url::from_file_path(direct).ok().map(|uri| uri.to_string());
+    }
+
+    let nested = base_dir.join(format!("{}.thy", theory_name.replace('.', "/")));
+    if nested.is_file() {
+        return Url::from_file_path(nested).ok().map(|uri| uri.to_string());
+    }
+    None
+}
+
+fn line_identifier_spans(line: &str) -> Vec<(String, u32, u32)> {
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !is_identifier_char(chars[index]) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index + 1 < chars.len() && is_identifier_char(chars[index + 1]) {
+            index += 1;
+        }
+        let end = index.saturating_add(1);
+        let token = chars[start..end].iter().collect::<String>();
+        spans.push((
+            token,
+            u32::try_from(start).unwrap_or(0),
+            u32::try_from(end).unwrap_or(u32::MAX),
+        ));
+        index = end;
+    }
+
+    spans
+}
+
 const COMPLETION_KEYWORDS: &[&str] = &[
     "theory",
     "imports",
@@ -2202,6 +2378,7 @@ async fn read_document_from_uri(uri: &str) -> Option<String> {
 #[cfg(test)]
 mod real_adapter_tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn process_theories_parser_extracts_line_diagnostics() {
@@ -2352,6 +2529,40 @@ Unfinished session(s): Draft
             vec!["name".to_string(), "statement".to_string()]
         );
         assert_eq!(help.active_parameter, 1);
+    }
+
+    #[test]
+    fn document_links_from_text_extracts_http_target() {
+        let links = document_links_from_text(
+            "file:///tmp/Example.thy",
+            "text \"https://isabelle.in.tum.de/index.html\"",
+        );
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].target.as_deref(),
+            Some("https://isabelle.in.tum.de/index.html")
+        );
+    }
+
+    #[test]
+    fn document_links_from_text_resolves_imported_theory_file() {
+        let temp = tempdir().expect("tempdir");
+        let imported = temp.path().join("Demo.thy");
+        std::fs::write(&imported, "theory Demo imports Main begin\nend\n")
+            .expect("write imported theory");
+
+        let current = temp.path().join("Main.thy");
+        let uri = Url::from_file_path(&current).expect("main uri").to_string();
+        let expected = Url::from_file_path(&imported)
+            .expect("import uri")
+            .to_string();
+
+        let links = document_links_from_text(&uri, "theory Main imports Demo begin\nend\n");
+        assert!(
+            links
+                .iter()
+                .any(|link| link.target.as_deref() == Some(expected.as_str()))
+        );
     }
 
     #[tokio::test]

@@ -28,6 +28,8 @@ pub enum MessageType {
     WorkspaceSymbols,
     #[serde(rename = "signature_help")]
     SignatureHelp,
+    #[serde(rename = "document_links")]
+    DocumentLinks,
     #[serde(rename = "diagnostics")]
     Diagnostics,
     #[serde(rename = "markup")]
@@ -164,6 +166,16 @@ pub struct SignatureHelpPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct DocumentLinkPayload {
+    pub range: Range,
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub tooltip: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Diagnostic {
     pub uri: String,
     pub range: Range,
@@ -281,6 +293,10 @@ impl Message {
     }
 
     pub fn signature_help_payload(&self) -> Result<Option<SignatureHelpPayload>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn document_links_payload(&self) -> Result<Vec<DocumentLinkPayload>, ProtocolError> {
         self.payload_as()
     }
 
@@ -454,5 +470,18 @@ pub fn signature_help_message_from_request(
         session: request.session.clone(),
         version: request.version,
         payload: serde_json::to_value(signature_help)?,
+    })
+}
+
+pub fn document_links_message_from_request(
+    request: &Message,
+    links: Vec<DocumentLinkPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::DocumentLinks,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(links)?,
     })
 }
