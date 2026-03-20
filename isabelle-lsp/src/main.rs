@@ -22,7 +22,10 @@ use push::{PushEvent, spawn_push_worker};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::Duration;
 use tower_lsp::jsonrpc::Result as JsonRpcResult;
@@ -46,8 +49,10 @@ use tower_lsp::lsp_types::{
     ParameterInformation, ParameterLabel, Position, PrepareRenameResponse, Range as LspRange,
     ReferenceParams, RenameOptions, RenameParams, SelectionRange, SelectionRangeParams,
     SelectionRangeProviderCapability, SemanticToken, SemanticTokenModifier, SemanticTokenType,
-    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    SemanticTokens, SemanticTokensDelta, SemanticTokensDeltaParams, SemanticTokensEdit,
+    SemanticTokensFullDeltaResult, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, SemanticTokensServerCapabilities,
     ServerCapabilities, ServerInfo, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
     SignatureInformation, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
     TextDocumentItem, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
@@ -84,6 +89,21 @@ struct DocumentState {
     version: i64,
 }
 
+#[derive(Clone)]
+struct SemanticTokensCacheEntry {
+    result_id: String,
+    data: Vec<SemanticToken>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct AbsoluteSemanticToken {
+    line: u32,
+    start: u32,
+    length: u32,
+    token_type: u32,
+    token_modifiers_bitset: u32,
+}
+
 struct IsabelleLanguageServer {
     client: Client,
     bridge: BridgeTransport,
@@ -91,6 +111,8 @@ struct IsabelleLanguageServer {
     published_diagnostic_targets: PublishedDiagnosticTargets,
     session_running: Arc<RwLock<bool>>,
     push_tx: mpsc::UnboundedSender<PushEvent>,
+    semantic_tokens_cache: Arc<RwLock<HashMap<Url, SemanticTokensCacheEntry>>>,
+    semantic_tokens_nonce: AtomicU64,
 }
 
 impl IsabelleLanguageServer {
@@ -105,6 +127,7 @@ impl IsabelleLanguageServer {
         let published_diagnostic_targets = Arc::new(RwLock::new(HashMap::new()));
         let session_running = Arc::new(RwLock::new(true));
         let (push_tx, push_rx) = mpsc::unbounded_channel();
+        let semantic_tokens_cache = Arc::new(RwLock::new(HashMap::new()));
 
         spawn_push_worker(
             push_rx,
@@ -122,6 +145,8 @@ impl IsabelleLanguageServer {
             published_diagnostic_targets,
             session_running,
             push_tx,
+            semantic_tokens_cache,
+            semantic_tokens_nonce: AtomicU64::new(1),
         }
     }
 
@@ -541,16 +566,19 @@ impl IsabelleLanguageServer {
             .collect())
     }
 
-    async fn semantic_tokens(
+    fn next_semantic_tokens_result_id(&self) -> String {
+        self.semantic_tokens_nonce
+            .fetch_add(1, Ordering::Relaxed)
+            .to_string()
+    }
+
+    async fn semantic_token_payloads(
         &self,
         uri: &Url,
         version: i64,
-    ) -> Result<SemanticTokensResult, String> {
+    ) -> Result<Vec<SemanticTokenPayload>, String> {
         if !self.is_session_running().await {
-            return Ok(SemanticTokensResult::Tokens(SemanticTokens {
-                result_id: None,
-                data: Vec::new(),
-            }));
+            return Ok(Vec::new());
         }
 
         self.flush_pushes(Some(vec![uri.clone()])).await;
@@ -573,10 +601,83 @@ impl IsabelleLanguageServer {
             ));
         }
 
-        let payload = response
+        response
             .semantic_tokens_payload()
-            .map_err(|err| err.to_string())?;
-        Ok(bridge_semantic_tokens_to_lsp(payload))
+            .map_err(|err| err.to_string())
+    }
+
+    async fn semantic_tokens_full_tokens(
+        &self,
+        uri: &Url,
+        version: i64,
+    ) -> Result<SemanticTokens, String> {
+        let payloads = self.semantic_token_payloads(uri, version).await?;
+        let tokens = bridge_semantic_tokens_to_lsp(payloads);
+        let result_id = self.next_semantic_tokens_result_id();
+
+        self.semantic_tokens_cache.write().await.insert(
+            uri.clone(),
+            SemanticTokensCacheEntry {
+                result_id: result_id.clone(),
+                data: tokens.data.clone(),
+            },
+        );
+
+        Ok(SemanticTokens {
+            result_id: Some(result_id),
+            data: tokens.data,
+        })
+    }
+
+    async fn semantic_tokens_delta(
+        &self,
+        uri: &Url,
+        version: i64,
+        previous_result_id: &str,
+    ) -> Result<SemanticTokensFullDeltaResult, String> {
+        let payloads = self.semantic_token_payloads(uri, version).await?;
+        let tokens = bridge_semantic_tokens_to_lsp(payloads);
+        let next_result_id = self.next_semantic_tokens_result_id();
+
+        let previous = {
+            let cache = self.semantic_tokens_cache.read().await;
+            cache.get(uri).cloned()
+        };
+
+        self.semantic_tokens_cache.write().await.insert(
+            uri.clone(),
+            SemanticTokensCacheEntry {
+                result_id: next_result_id.clone(),
+                data: tokens.data.clone(),
+            },
+        );
+
+        if let Some(previous) = previous
+            && previous.result_id == previous_result_id
+        {
+            let edits = semantic_tokens_delta_edits(&previous.data, &tokens.data);
+            return Ok(SemanticTokensFullDeltaResult::TokensDelta(
+                SemanticTokensDelta {
+                    result_id: Some(next_result_id),
+                    edits,
+                },
+            ));
+        }
+
+        Ok(SemanticTokensFullDeltaResult::Tokens(SemanticTokens {
+            result_id: Some(next_result_id),
+            data: tokens.data,
+        }))
+    }
+
+    async fn semantic_tokens_range_tokens(
+        &self,
+        uri: &Url,
+        version: i64,
+        range: LspRange,
+    ) -> Result<SemanticTokens, String> {
+        let payloads = self.semantic_token_payloads(uri, version).await?;
+        Ok(bridge_semantic_tokens_range_to_lsp(payloads, range))
     }
 
     async fn workspace_symbols(&self, query: String) -> Result<Vec<SymbolInformation>, String> {
@@ -1102,8 +1203,8 @@ impl LanguageServer for IsabelleLanguageServer {
                         SemanticTokensOptions {
                             work_done_progress_options: Default::default(),
                             legend: semantic_tokens_legend(),
-                            range: Some(false),
-                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: Some(true),
+                            full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
                         },
                     ),
                 ),
@@ -1177,6 +1278,7 @@ impl LanguageServer for IsabelleLanguageServer {
     async fn did_close(&self, params: tower_lsp::lsp_types::DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.remove_document(&uri).await;
+        self.semantic_tokens_cache.write().await.remove(&uri);
         self.clear_diagnostics_for_uri(uri).await;
     }
 
@@ -1594,12 +1696,69 @@ impl LanguageServer for IsabelleLanguageServer {
             .map(|snapshot| snapshot.version)
             .unwrap_or(1);
 
-        match self.semantic_tokens(&uri, version).await {
-            Ok(tokens) => Ok(Some(tokens)),
+        match self.semantic_tokens_full_tokens(&uri, version).await {
+            Ok(tokens) => Ok(Some(SemanticTokensResult::Tokens(tokens))),
             Err(err) => {
                 self.log_error(format!("failed to request semantic tokens: {err}"))
                     .await;
                 Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+                    result_id: None,
+                    data: Vec::new(),
+                })))
+            }
+        }
+    }
+
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> JsonRpcResult<Option<SemanticTokensFullDeltaResult>> {
+        let uri = params.text_document.uri;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self
+            .semantic_tokens_delta(&uri, version, &params.previous_result_id)
+            .await
+        {
+            Ok(delta) => Ok(Some(delta)),
+            Err(err) => {
+                self.log_error(format!("failed to request semantic token delta: {err}"))
+                    .await;
+                Ok(Some(SemanticTokensFullDeltaResult::Tokens(
+                    SemanticTokens {
+                        result_id: None,
+                        data: Vec::new(),
+                    },
+                )))
+            }
+        }
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> JsonRpcResult<Option<SemanticTokensRangeResult>> {
+        let uri = params.text_document.uri;
+        let range = params.range;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self
+            .semantic_tokens_range_tokens(&uri, version, range)
+            .await
+        {
+            Ok(tokens) => Ok(Some(SemanticTokensRangeResult::Tokens(tokens))),
+            Err(err) => {
+                self.log_error(format!("failed to request semantic tokens range: {err}"))
+                    .await;
+                Ok(Some(SemanticTokensRangeResult::Tokens(SemanticTokens {
                     result_id: None,
                     data: Vec::new(),
                 })))
@@ -2699,24 +2858,37 @@ fn semantic_token_type_index(token_type: &str) -> u32 {
     }
 }
 
-fn bridge_semantic_tokens_to_lsp(tokens: Vec<SemanticTokenPayload>) -> SemanticTokensResult {
+fn bridge_semantic_tokens_to_absolute(
+    tokens: Vec<SemanticTokenPayload>,
+) -> Vec<AbsoluteSemanticToken> {
     let mut tokens = tokens
         .into_iter()
         .filter_map(|token| {
             let line = u32::try_from(token.line.saturating_sub(1)).ok()?;
             let start = u32::try_from(token.col.saturating_sub(1)).ok()?;
             let length = u32::try_from(token.length.max(0)).ok()?;
-            Some((line, start, length, token.token_type))
+            Some(AbsoluteSemanticToken {
+                line,
+                start,
+                length,
+                token_type: semantic_token_type_index(&token.token_type),
+                token_modifiers_bitset: 0,
+            })
         })
         .collect::<Vec<_>>();
-    tokens.sort_by_key(|(line, start, _, _)| (*line, *start));
+    tokens.sort_by_key(|token| (token.line, token.start));
+    tokens
+}
 
+fn encode_semantic_tokens(tokens: &[AbsoluteSemanticToken]) -> Vec<SemanticToken> {
     let mut encoded = Vec::with_capacity(tokens.len());
     let mut prev_line = 0_u32;
     let mut prev_start = 0_u32;
     let mut is_first = true;
 
-    for (line, start, length, token_type) in tokens {
+    for token in tokens {
+        let line = token.line;
+        let start = token.start;
         let (delta_line, delta_start) = if is_first {
             is_first = false;
             (line, start)
@@ -2732,16 +2904,73 @@ fn bridge_semantic_tokens_to_lsp(tokens: Vec<SemanticTokenPayload>) -> SemanticT
         encoded.push(SemanticToken {
             delta_line,
             delta_start,
-            length,
-            token_type: semantic_token_type_index(&token_type),
-            token_modifiers_bitset: 0,
+            length: token.length,
+            token_type: token.token_type,
+            token_modifiers_bitset: token.token_modifiers_bitset,
         });
     }
 
-    SemanticTokensResult::Tokens(SemanticTokens {
+    encoded
+}
+
+fn bridge_semantic_tokens_to_lsp(tokens: Vec<SemanticTokenPayload>) -> SemanticTokens {
+    let absolute = bridge_semantic_tokens_to_absolute(tokens);
+    SemanticTokens {
         result_id: None,
-        data: encoded,
-    })
+        data: encode_semantic_tokens(&absolute),
+    }
+}
+
+fn bridge_semantic_tokens_range_to_lsp(
+    tokens: Vec<SemanticTokenPayload>,
+    range: LspRange,
+) -> SemanticTokens {
+    let absolute = bridge_semantic_tokens_to_absolute(tokens);
+    let filtered = absolute
+        .into_iter()
+        .filter(|token| semantic_token_overlaps_range(token, &range))
+        .collect::<Vec<_>>();
+    SemanticTokens {
+        result_id: None,
+        data: encode_semantic_tokens(&filtered),
+    }
+}
+
+fn semantic_token_overlaps_range(token: &AbsoluteSemanticToken, range: &LspRange) -> bool {
+    if token.line < range.start.line || token.line > range.end.line {
+        return false;
+    }
+
+    let token_start = token.start;
+    let token_end = token.start.saturating_add(token.length);
+    if token.line == range.start.line && token_end <= range.start.character {
+        return false;
+    }
+    if token.line == range.end.line && token_start >= range.end.character {
+        return false;
+    }
+    true
+}
+
+fn semantic_tokens_encoded_len(tokens: &[SemanticToken]) -> u32 {
+    u32::try_from(tokens.len())
+        .unwrap_or(u32::MAX)
+        .saturating_mul(5)
+}
+
+fn semantic_tokens_delta_edits(
+    previous: &[SemanticToken],
+    current: &[SemanticToken],
+) -> Vec<SemanticTokensEdit> {
+    if previous == current {
+        return Vec::new();
+    }
+
+    vec![SemanticTokensEdit {
+        start: 0,
+        delete_count: semantic_tokens_encoded_len(previous),
+        data: Some(current.to_vec()),
+    }]
 }
 
 fn bridge_document_link_to_lsp(payload: BridgeDocumentLinkPayload) -> Option<DocumentLink> {
@@ -3097,6 +3326,99 @@ mod tests {
         assert_eq!(hint.position.line, 1);
         assert_eq!(hint.position.character, 5);
         assert!(matches!(hint.kind, Some(InlayHintKind::PARAMETER)));
+    }
+
+    #[test]
+    fn bridge_semantic_tokens_range_to_lsp_filters_outside_tokens() {
+        let payload = vec![
+            SemanticTokenPayload {
+                uri: "file:///tmp/Example.thy".to_string(),
+                line: 1,
+                col: 1,
+                length: 4,
+                token_type: "keyword".to_string(),
+            },
+            SemanticTokenPayload {
+                uri: "file:///tmp/Example.thy".to_string(),
+                line: 2,
+                col: 4,
+                length: 3,
+                token_type: "function".to_string(),
+            },
+            SemanticTokenPayload {
+                uri: "file:///tmp/Example.thy".to_string(),
+                line: 2,
+                col: 11,
+                length: 2,
+                token_type: "variable".to_string(),
+            },
+        ];
+
+        let tokens = super::bridge_semantic_tokens_range_to_lsp(
+            payload,
+            LspRange {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 10,
+                },
+            },
+        );
+
+        assert_eq!(tokens.data.len(), 1);
+        assert_eq!(tokens.data[0].delta_line, 1);
+        assert_eq!(tokens.data[0].delta_start, 3);
+        assert_eq!(tokens.data[0].length, 3);
+        assert_eq!(tokens.data[0].token_type, 1);
+    }
+
+    #[test]
+    fn semantic_tokens_delta_edits_empty_when_unchanged() {
+        let current = vec![SemanticToken {
+            delta_line: 0,
+            delta_start: 0,
+            length: 3,
+            token_type: 0,
+            token_modifiers_bitset: 0,
+        }];
+        let edits = super::semantic_tokens_delta_edits(&current, &current);
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn semantic_tokens_delta_edits_replace_full_payload_when_changed() {
+        let previous = vec![SemanticToken {
+            delta_line: 0,
+            delta_start: 0,
+            length: 3,
+            token_type: 0,
+            token_modifiers_bitset: 0,
+        }];
+        let current = vec![
+            SemanticToken {
+                delta_line: 0,
+                delta_start: 0,
+                length: 4,
+                token_type: 0,
+                token_modifiers_bitset: 0,
+            },
+            SemanticToken {
+                delta_line: 1,
+                delta_start: 2,
+                length: 2,
+                token_type: 1,
+                token_modifiers_bitset: 0,
+            },
+        ];
+
+        let edits = super::semantic_tokens_delta_edits(&previous, &current);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].start, 0);
+        assert_eq!(edits[0].delete_count, 5);
+        assert_eq!(edits[0].data, Some(current));
     }
 
     #[test]
