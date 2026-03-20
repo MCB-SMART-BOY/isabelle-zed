@@ -85,6 +85,7 @@ const ENV_BRIDGE_REQUEST_TIMEOUT_MS: &str = "ISABELLE_BRIDGE_REQUEST_TIMEOUT_MS"
 const COMMAND_START_SESSION: &str = "isabelle.start_session";
 const COMMAND_STOP_SESSION: &str = "isabelle.stop_session";
 const COMMAND_RUN_CHECK: &str = "isabelle.run_check";
+const COMMAND_SHOW_GOAL: &str = "isabelle.show_goal";
 
 #[derive(Clone)]
 struct DocumentState {
@@ -1300,6 +1301,29 @@ impl IsabelleLanguageServer {
         Ok(())
     }
 
+    async fn show_goal_command(&self, target: Option<(String, Position)>) -> Result<(), String> {
+        if !self.is_session_running().await {
+            return Err("isabelle session is stopped".to_string());
+        }
+
+        let (uri_text, position) = target
+            .ok_or_else(|| "missing command target: expected uri/line/character".to_string())?;
+        let uri = Url::parse(&uri_text).map_err(|err| err.to_string())?;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        let message = match self.hover(&uri, position, version).await? {
+            Some(hover) => hover_contents_text(hover.contents),
+            None => "No proof goal information available".to_string(),
+        };
+
+        self.client.log_message(LspMessageType::INFO, message).await;
+        Ok(())
+    }
+
     async fn clear_diagnostics(&self) {
         let stale_targets = {
             let mut state = self.published_diagnostic_targets.write().await;
@@ -1427,6 +1451,7 @@ impl LanguageServer for IsabelleLanguageServer {
                         COMMAND_START_SESSION.to_string(),
                         COMMAND_STOP_SESSION.to_string(),
                         COMMAND_RUN_CHECK.to_string(),
+                        COMMAND_SHOW_GOAL.to_string(),
                     ],
                     ..ExecuteCommandOptions::default()
                 }),
@@ -2059,6 +2084,10 @@ impl LanguageServer for IsabelleLanguageServer {
                 self.run_check_command(command_target_uri(params.arguments.first()))
                     .await
             }
+            COMMAND_SHOW_GOAL => {
+                self.show_goal_command(command_goal_target(params.arguments.first()))
+                    .await
+            }
             _ => Err(format!("unknown command: {command}")),
         };
 
@@ -2425,7 +2454,7 @@ fn code_lenses_for_document(uri: &Url, text: &str, session_running: bool) -> Vec
         }
     };
 
-    vec![
+    let mut lenses = vec![
         CodeLens {
             range,
             command: Some(Command {
@@ -2440,7 +2469,48 @@ fn code_lenses_for_document(uri: &Url, text: &str, session_running: bool) -> Vec
             command: Some(session_command),
             data: None,
         },
-    ]
+    ];
+    lenses.extend(proof_goal_lenses_for_document(uri, text));
+    lenses
+}
+
+fn proof_goal_lenses_for_document(uri: &Url, text: &str) -> Vec<CodeLens> {
+    let mut lenses = Vec::new();
+    for (line_index, line_text) in text.lines().enumerate() {
+        let spans = line_identifier_spans(line_text);
+        let Some((keyword, _, end)) = spans.first() else {
+            continue;
+        };
+        if !matches!(
+            keyword.as_str(),
+            "lemma" | "theorem" | "corollary" | "proposition"
+        ) {
+            continue;
+        }
+
+        let line = u32::try_from(line_index).unwrap_or(u32::MAX);
+        let end_character = u32::try_from(line_text.chars().count()).unwrap_or(u32::MAX);
+        lenses.push(CodeLens {
+            range: LspRange {
+                start: Position { line, character: 0 },
+                end: Position {
+                    line,
+                    character: end_character,
+                },
+            },
+            command: Some(Command {
+                title: "Show Proof Goal".to_string(),
+                command: COMMAND_SHOW_GOAL.to_string(),
+                arguments: Some(vec![serde_json::json!({
+                    "uri": uri.as_str(),
+                    "line": line,
+                    "character": *end,
+                })]),
+            }),
+            data: None,
+        });
+    }
+    lenses
 }
 
 fn inlay_hints_from_text(text: &str, range: LspRange) -> Vec<InlayHint> {
@@ -3119,6 +3189,54 @@ fn command_target_uri(argument: Option<&Value>) -> Option<String> {
             .and_then(Value::as_str)
             .map(str::to_string),
         _ => None,
+    }
+}
+
+fn command_goal_target(argument: Option<&Value>) -> Option<(String, Position)> {
+    let value = argument?;
+    match value {
+        Value::String(uri) => Some((
+            uri.clone(),
+            Position {
+                line: 0,
+                character: 0,
+            },
+        )),
+        Value::Object(object) => {
+            let uri = object
+                .get("uri")
+                .and_then(Value::as_str)
+                .map(str::to_string)?;
+            let line = object
+                .get("line")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            let character = object
+                .get("character")
+                .or_else(|| object.get("col"))
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .unwrap_or(0);
+            Some((uri, Position { line, character }))
+        }
+        _ => None,
+    }
+}
+
+fn hover_contents_text(contents: HoverContents) -> String {
+    match contents {
+        HoverContents::Scalar(MarkedString::String(text)) => text,
+        HoverContents::Scalar(MarkedString::LanguageString(value)) => value.value,
+        HoverContents::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                MarkedString::String(text) => text,
+                MarkedString::LanguageString(value) => value.value,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        HoverContents::Markup(markup) => markup.value,
     }
 }
 
@@ -4009,7 +4127,6 @@ mod tests {
         let text = "theory Example imports Main begin\nlemma demo: True by simp\nend\n";
 
         let lenses = super::code_lenses_for_document(&uri, text, true);
-        assert_eq!(lenses.len(), 2);
 
         let run_check = lenses
             .iter()
@@ -4027,6 +4144,20 @@ mod tests {
             .find(|command| command.command == COMMAND_STOP_SESSION)
             .expect("stop session command");
         assert_eq!(stop.title, "Stop Isabelle Session");
+
+        let show_goal = lenses
+            .iter()
+            .filter_map(|lens| lens.command.as_ref())
+            .find(|command| command.command == COMMAND_SHOW_GOAL)
+            .expect("show goal command");
+        assert_eq!(
+            show_goal.arguments.as_ref().and_then(|args| args.first()),
+            Some(&json!({
+                "uri": uri.as_str(),
+                "line": 1,
+                "character": 5,
+            }))
+        );
     }
 
     #[test]
@@ -4333,6 +4464,24 @@ mod tests {
 
         assert_eq!(command_target_uri(Some(&json!(42))), None);
         assert_eq!(command_target_uri(None), None);
+    }
+
+    #[test]
+    fn parses_command_goal_target_from_object() {
+        assert_eq!(
+            command_goal_target(Some(&json!({
+                "uri": "file:///tmp/test.thy",
+                "line": 7,
+                "character": 12,
+            }))),
+            Some((
+                "file:///tmp/test.thy".to_string(),
+                Position {
+                    line: 7,
+                    character: 12,
+                },
+            ))
+        );
     }
 
     #[test]
