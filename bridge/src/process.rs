@@ -772,8 +772,8 @@ impl RealAdapterState {
             .collect::<HashMap<_, _>>();
 
         let mut tokens = Vec::new();
-        for (line_index, line_text) in text.lines().enumerate() {
-            for (token, start_col, end_col) in identifier_tokens_in_line(line_text) {
+        for (line_index, line_tokens) in identifier_tokens_by_line(&text).into_iter().enumerate() {
+            for (token, start_col, end_col) in line_tokens {
                 let token_type = if COMPLETION_KEYWORDS.contains(&token.as_str()) {
                     "keyword"
                 } else if let Some(kind) = declaration_kinds.get(&token) {
@@ -840,8 +840,8 @@ impl RealAdapterState {
         };
 
         let mut actions = Vec::new();
-        for (line_index, line_text) in text.lines().enumerate() {
-            for (token, start_col, end_col) in identifier_tokens_in_line(line_text) {
+        for (line_index, line_tokens) in identifier_tokens_by_line(&text).into_iter().enumerate() {
+            for (token, start_col, end_col) in line_tokens {
                 if token != "sorry" {
                     continue;
                 }
@@ -1223,8 +1223,8 @@ fn theory_header(text: &str) -> Option<TheoryHeader> {
     let mut imports = Vec::new();
     let mut collecting_imports = false;
 
-    for line in text.lines() {
-        let tokens = identifier_tokens_in_line(line)
+    for line_tokens in identifier_tokens_by_line(text) {
+        let tokens = line_tokens
             .into_iter()
             .map(|(token, _, _)| token)
             .collect::<Vec<_>>();
@@ -1445,7 +1445,7 @@ fn build_hover_info(text: &str, line: usize, col: usize) -> String {
     }
 
     let line_text = lines[line - 1];
-    if let Some((identifier, start_col, end_col)) = extract_identifier_at(line_text, col) {
+    if let Some((identifier, start_col, end_col)) = identifier_at_position(text, line, col) {
         return format!(
             "Identifier: {identifier}\nRange: {line}:{start_col}-{line}:{end_col}\n{line_text}"
         );
@@ -1524,8 +1524,7 @@ fn semantic_token_type_from_declaration_kind(kind: &str) -> &'static str {
 
 fn declaration_symbols(text: &str) -> Vec<DeclarationSymbol> {
     let mut symbols = Vec::new();
-    for (line_index, line_text) in text.lines().enumerate() {
-        let tokens = identifier_tokens_in_line(line_text);
+    for (line_index, tokens) in identifier_tokens_by_line(text).into_iter().enumerate() {
         if tokens.len() < 2 {
             continue;
         }
@@ -1556,11 +1555,16 @@ fn declaration_symbols(text: &str) -> Vec<DeclarationSymbol> {
 }
 
 fn identifier_at_position(text: &str, line: usize, col: usize) -> Option<(String, usize, usize)> {
-    let lines = text.lines().collect::<Vec<_>>();
-    if lines.is_empty() || line == 0 || line > lines.len() {
+    let tokens_by_line = identifier_tokens_by_line(text);
+    if tokens_by_line.is_empty() || line == 0 || line > tokens_by_line.len() {
         return None;
     }
-    extract_identifier_at(lines[line - 1], col)
+    for (token, start_col, end_col) in &tokens_by_line[line - 1] {
+        if col >= *start_col && col <= end_col.saturating_add(1) {
+            return Some((token.clone(), *start_col, *end_col));
+        }
+    }
+    None
 }
 
 fn identifier_prefix_at_position(text: &str, line: usize, col: usize) -> Option<String> {
@@ -1605,8 +1609,8 @@ fn identifier_prefix_at_position(text: &str, line: usize, col: usize) -> Option<
 
 fn identifier_ranges(text: &str, identifier: &str) -> Vec<Range> {
     let mut ranges = Vec::new();
-    for (line_index, line_text) in text.lines().enumerate() {
-        for (token, start_col, end_col) in identifier_tokens_in_line(line_text) {
+    for (line_index, tokens) in identifier_tokens_by_line(text).into_iter().enumerate() {
+        for (token, start_col, end_col) in tokens {
             if token != identifier {
                 continue;
             }
@@ -1656,8 +1660,8 @@ fn completion_items_from_documents(
     }
 
     for (_, text) in docs {
-        for line in text.lines() {
-            for (token, _, _) in identifier_tokens_in_line(line) {
+        for tokens in identifier_tokens_by_line(text) {
+            for (token, _, _) in tokens {
                 if prefix.is_empty() || token.starts_with(prefix) {
                     labels.insert(token);
                 }
@@ -1676,8 +1680,8 @@ fn completion_items_from_documents(
 }
 
 fn has_theory_header(text: &str) -> bool {
-    text.lines().any(|line| {
-        identifier_tokens_in_line(line)
+    identifier_tokens_by_line(text).into_iter().any(|tokens| {
+        tokens
             .first()
             .map(|(token, _, _)| token == "theory")
             .unwrap_or(false)
@@ -1685,11 +1689,9 @@ fn has_theory_header(text: &str) -> bool {
 }
 
 fn contains_end_keyword(text: &str) -> bool {
-    text.lines().any(|line| {
-        identifier_tokens_in_line(line)
-            .iter()
-            .any(|(token, _, _)| token == "end")
-    })
+    identifier_tokens_by_line(text)
+        .into_iter()
+        .any(|tokens| tokens.iter().any(|(token, _, _)| token == "end"))
 }
 
 fn diagnostics_indicate_unfinished_theory(diagnostics: &[Diagnostic]) -> bool {
@@ -1715,84 +1717,83 @@ fn document_end_position(text: &str) -> Position {
     }
 }
 
-fn identifier_tokens_in_line(line_text: &str) -> Vec<(String, usize, usize)> {
-    let chars = line_text.char_indices().collect::<Vec<_>>();
-    if chars.is_empty() {
-        return Vec::new();
-    }
+fn identifier_tokens_by_line(text: &str) -> Vec<Vec<(String, usize, usize)>> {
+    let mut by_line = Vec::new();
+    let mut comment_depth = 0usize;
+    let mut in_string = false;
 
-    let mut tokens = Vec::new();
-    let mut index = 0;
-    while index < chars.len() {
-        if !is_identifier_char(chars[index].1) {
-            index += 1;
-            continue;
+    for line in text.lines() {
+        let chars = line.char_indices().collect::<Vec<_>>();
+        let mut tokens = Vec::new();
+        let mut index = 0usize;
+
+        while index < chars.len() {
+            let ch = chars[index].1;
+            let next = chars.get(index + 1).map(|(_, value)| *value);
+
+            if comment_depth > 0 {
+                if ch == '(' && next == Some('*') {
+                    comment_depth = comment_depth.saturating_add(1);
+                    index = index.saturating_add(2);
+                    continue;
+                }
+                if ch == '*' && next == Some(')') {
+                    comment_depth = comment_depth.saturating_sub(1);
+                    index = index.saturating_add(2);
+                    continue;
+                }
+                index = index.saturating_add(1);
+                continue;
+            }
+
+            if in_string {
+                if ch == '\\' {
+                    index = index.saturating_add(2);
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = false;
+                }
+                index = index.saturating_add(1);
+                continue;
+            }
+
+            if ch == '(' && next == Some('*') {
+                comment_depth = 1;
+                index = index.saturating_add(2);
+                continue;
+            }
+            if ch == '"' {
+                in_string = true;
+                index = index.saturating_add(1);
+                continue;
+            }
+            if !is_identifier_char(ch) {
+                index = index.saturating_add(1);
+                continue;
+            }
+
+            let start = index;
+            while index + 1 < chars.len() && is_identifier_char(chars[index + 1].1) {
+                index += 1;
+            }
+            let end = index;
+
+            let start_byte = chars[start].0;
+            let end_byte = if end + 1 < chars.len() {
+                chars[end + 1].0
+            } else {
+                line.len()
+            };
+
+            tokens.push((line[start_byte..end_byte].to_string(), start + 1, end + 1));
+            index = index.saturating_add(1);
         }
 
-        let start = index;
-        while index + 1 < chars.len() && is_identifier_char(chars[index + 1].1) {
-            index += 1;
-        }
-        let end = index;
-
-        let start_byte = chars[start].0;
-        let end_byte = if end + 1 < chars.len() {
-            chars[end + 1].0
-        } else {
-            line_text.len()
-        };
-        tokens.push((
-            line_text[start_byte..end_byte].to_string(),
-            start + 1,
-            end + 1,
-        ));
-
-        index += 1;
+        by_line.push(tokens);
     }
 
-    tokens
-}
-
-fn extract_identifier_at(line_text: &str, col: usize) -> Option<(String, usize, usize)> {
-    let chars = line_text.char_indices().collect::<Vec<_>>();
-    if chars.is_empty() {
-        return None;
-    }
-
-    let mut index = col.saturating_sub(1);
-    if index >= chars.len() {
-        index = chars.len() - 1;
-    }
-
-    if !is_identifier_char(chars[index].1) && index > 0 && is_identifier_char(chars[index - 1].1) {
-        index -= 1;
-    }
-    if !is_identifier_char(chars[index].1) {
-        return None;
-    }
-
-    let mut start = index;
-    while start > 0 && is_identifier_char(chars[start - 1].1) {
-        start -= 1;
-    }
-
-    let mut end = index;
-    while end + 1 < chars.len() && is_identifier_char(chars[end + 1].1) {
-        end += 1;
-    }
-
-    let start_byte = chars[start].0;
-    let end_byte = if end + 1 < chars.len() {
-        chars[end + 1].0
-    } else {
-        line_text.len()
-    };
-
-    Some((
-        line_text[start_byte..end_byte].to_string(),
-        start + 1,
-        end + 1,
-    ))
+    by_line
 }
 
 fn is_identifier_char(ch: char) -> bool {
@@ -1914,10 +1915,25 @@ Unfinished session(s): Draft
     }
 
     #[test]
+    fn declaration_symbols_ignores_comments_and_strings() {
+        let text = "theory Demo imports Main begin\n(* lemma hidden: True by simp *)\ntext \"lemma quoted: True\"\nlemma visible: True by simp\nend\n";
+        let symbols = declaration_symbols(text);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "visible");
+    }
+
+    #[test]
     fn identifier_ranges_finds_all_occurrences() {
         let text = "lemma foo: True\nhave foo by simp\nshow foo by simp\n";
         let ranges = identifier_ranges(text, "foo");
         assert_eq!(ranges.len(), 3);
+    }
+
+    #[test]
+    fn identifier_ranges_ignores_comments_and_strings() {
+        let text = "lemma foo: True\n(* foo *)\ntext \"foo\"\nhave foo by simp\n";
+        let ranges = identifier_ranges(text, "foo");
+        assert_eq!(ranges.len(), 2);
     }
 
     #[test]
@@ -1970,6 +1986,25 @@ Unfinished session(s): Draft
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "quickfix");
         assert_eq!(actions[0].edits[0].new_text, "by simp");
+    }
+
+    #[tokio::test]
+    async fn code_actions_ignores_sorry_in_comments_and_strings() {
+        let uri = "file:///tmp/Example.thy";
+        let text = "theory Example imports Main begin\n(* sorry *)\ntext \"sorry\"\nlemma foo: True by simp\nend\n";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: text.to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let actions = state.code_actions(uri).await;
+        assert!(actions.is_empty());
     }
 
     #[tokio::test]
