@@ -57,3 +57,19 @@ fn invalid_type_fails() {
     let error = parse_message(invalid).expect_err("unknown message types must fail");
     assert!(error.to_string().contains("invalid message JSON"));
 }
+
+#[test]
+fn rename_result_payload_decodes_warning() {
+    let raw = r#"{"id":"msg-0002","type":"rename","session":"s1","version":1,"payload":{"edits":[],"warning":"rename aborted: ambiguous symbol"}}"#;
+    let message = parse_message(raw).expect("rename payload should parse");
+    assert_eq!(message.msg_type, MessageType::Rename);
+
+    let payload = message
+        .rename_result_payload()
+        .expect("rename result payload should decode");
+    assert!(payload.edits.is_empty());
+    assert_eq!(
+        payload.warning.as_deref(),
+        Some("rename aborted: ambiguous symbol")
+    );
+}

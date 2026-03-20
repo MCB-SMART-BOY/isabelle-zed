@@ -126,6 +126,14 @@ pub struct TextEditPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct RenameResultPayload {
+    pub edits: Vec<TextEditPayload>,
+    #[serde(default)]
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CodeActionPayload {
     pub title: String,
     pub kind: String,
@@ -248,6 +256,10 @@ impl Message {
         self.payload_as()
     }
 
+    pub fn rename_result_payload(&self) -> Result<RenameResultPayload, ProtocolError> {
+        self.payload_as()
+    }
+
     pub fn code_actions_payload(&self) -> Result<Vec<CodeActionPayload>, ProtocolError> {
         self.payload_as()
     }
@@ -360,6 +372,20 @@ pub fn text_edits_message_from_request(
         session: request.session.clone(),
         version: request.version,
         payload: serde_json::to_value(edits)?,
+    })
+}
+
+pub fn rename_message_from_request(
+    request: &Message,
+    edits: Vec<TextEditPayload>,
+    warning: Option<String>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::Rename,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(RenameResultPayload { edits, warning })?,
     })
 }
 

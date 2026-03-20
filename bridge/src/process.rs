@@ -1,11 +1,11 @@
 use crate::protocol::{
     CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentUriPayload, LocationPayload,
-    Message, MessageType, Position, QueryPayload, Range, RenamePayload, SemanticTokenPayload,
-    Severity, SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
+    Message, MessageType, Position, QueryPayload, Range, RenamePayload, RenameResultPayload,
+    SemanticTokenPayload, Severity, SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
     code_actions_message_from_request, completion_message_from_request,
     diagnostics_message_from_request, location_message_from_request, markup_message_from_request,
-    parse_message, semantic_tokens_message_from_request, symbols_message_from_request,
-    text_edits_message_from_request, to_ndjson, workspace_symbols_message_from_request,
+    parse_message, rename_message_from_request, semantic_tokens_message_from_request,
+    symbols_message_from_request, to_ndjson, workspace_symbols_message_from_request,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -458,10 +458,8 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 symbols_message_from_request(&request, Vec::<SymbolPayload>::new())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
-            MessageType::Rename => {
-                text_edits_message_from_request(&request, MessageType::Rename, Vec::new())
-                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
-            }
+            MessageType::Rename => rename_message_from_request(&request, Vec::new(), None)
+                .map_err(|err| ProcessError::Protocol(err.to_string()))?,
             MessageType::CodeAction => {
                 code_actions_message_from_request(&request, Vec::<CodeActionPayload>::new())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
@@ -828,18 +826,24 @@ impl RealAdapterState {
         tokens
     }
 
-    async fn rename_edits(
+    async fn rename_result(
         &self,
         uri: &str,
         offset: Position,
         new_name: String,
-    ) -> Vec<TextEditPayload> {
+    ) -> RenameResultPayload {
         if new_name.trim().is_empty() {
-            return Vec::new();
+            return RenameResultPayload {
+                edits: Vec::new(),
+                warning: Some("rename aborted: new name is empty".to_string()),
+            };
         }
 
         let Some(text) = self.resolve_text(uri).await else {
-            return Vec::new();
+            return RenameResultPayload {
+                edits: Vec::new(),
+                warning: Some("rename aborted: no theory text is available".to_string()),
+            };
         };
 
         let Some((identifier, _, _)) = identifier_at_position(
@@ -847,8 +851,32 @@ impl RealAdapterState {
             normalize_one_based(offset.line),
             normalize_one_based(offset.col),
         ) else {
-            return Vec::new();
+            return RenameResultPayload {
+                edits: Vec::new(),
+                warning: Some("rename aborted: cursor is not on an identifier".to_string()),
+            };
         };
+
+        let declaration_locations = self.definition_locations(uri, offset.clone()).await;
+        let unique_declarations = declaration_locations
+            .iter()
+            .map(location_identity)
+            .collect::<HashSet<_>>();
+        if unique_declarations.is_empty() {
+            return RenameResultPayload {
+                edits: Vec::new(),
+                warning: Some("rename aborted: declaration cannot be resolved".to_string()),
+            };
+        }
+        if unique_declarations.len() > 1 {
+            return RenameResultPayload {
+                edits: Vec::new(),
+                warning: Some(format!(
+                    "rename aborted: symbol `{identifier}` is ambiguous ({} declarations)",
+                    unique_declarations.len()
+                )),
+            };
+        }
 
         let focus_line = i64::try_from(normalize_one_based(offset.line)).unwrap_or(i64::MAX);
         let mut edits = self
@@ -874,7 +902,10 @@ impl RealAdapterState {
         edits.dedup_by(|a, b| {
             text_edit_identity(a) == text_edit_identity(b) && a.new_text == b.new_text
         });
-        edits
+        RenameResultPayload {
+            edits,
+            warning: None,
+        }
     }
 
     async fn code_actions(&self, uri: &str) -> Vec<CodeActionPayload> {
@@ -1099,10 +1130,10 @@ pub async fn run_real_adapter(
             MessageType::Rename => {
                 let payload: RenamePayload = serde_json::from_value(request.payload.clone())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?;
-                let edits = state
-                    .rename_edits(&payload.uri, payload.offset, payload.new_name)
+                let result = state
+                    .rename_result(&payload.uri, payload.offset, payload.new_name)
                     .await;
-                text_edits_message_from_request(&request, MessageType::Rename, edits)
+                rename_message_from_request(&request, result.edits, result.warning)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::CodeAction => {
@@ -2105,8 +2136,9 @@ Unfinished session(s): Draft
         );
 
         let edits = state
-            .rename_edits(uri, Position { line: 1, col: 7 }, "bar".to_string())
-            .await;
+            .rename_result(uri, Position { line: 1, col: 7 }, "bar".to_string())
+            .await
+            .edits;
         assert_eq!(edits.len(), 3);
         assert!(edits.iter().all(|edit| edit.new_text == "bar"));
     }
@@ -2297,8 +2329,9 @@ Unfinished session(s): Draft
         );
 
         let edits = state
-            .rename_edits(uri_b, Position { line: 2, col: 17 }, "bar".to_string())
-            .await;
+            .rename_result(uri_b, Position { line: 2, col: 17 }, "bar".to_string())
+            .await
+            .edits;
         assert!(edits.iter().any(|edit| edit.uri == uri_a));
         assert!(edits.iter().any(|edit| edit.uri == uri_b));
     }
@@ -2327,10 +2360,56 @@ Unfinished session(s): Draft
         );
 
         let edits = state
-            .rename_edits(uri_b, Position { line: 2, col: 16 }, "bar".to_string())
-            .await;
+            .rename_result(uri_b, Position { line: 2, col: 16 }, "bar".to_string())
+            .await
+            .edits;
         assert!(!edits.is_empty());
         assert_eq!(edits[0].uri, uri_b);
+    }
+
+    #[tokio::test]
+    async fn rename_result_reports_ambiguity() {
+        let uri_a = "file:///tmp/A.thy";
+        let uri_b = "file:///tmp/B.thy";
+        let uri_c = "file:///tmp/C.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri_a.to_string(),
+            CachedDocument {
+                text: "theory A imports Main begin\nlemma foo: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_b.to_string(),
+            CachedDocument {
+                text: "theory B imports Main begin\nlemma foo: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_c.to_string(),
+            CachedDocument {
+                text: "theory C imports A B begin\nlemma use: foo by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let result = state
+            .rename_result(uri_c, Position { line: 2, col: 13 }, "bar".to_string())
+            .await;
+        assert!(result.edits.is_empty());
+        assert!(
+            result
+                .warning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("ambiguous")
+        );
     }
 
     #[tokio::test]

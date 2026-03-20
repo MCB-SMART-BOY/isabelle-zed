@@ -8,8 +8,8 @@ use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
     CodeActionPayload as BridgeCodeActionPayload, CompletionItemPayload, DocumentCheckPayload,
     DocumentUriPayload, LocationPayload, MarkupPayload, Message, MessageType,
-    Position as BridgePosition, QueryPayload, RenamePayload, SemanticTokenPayload, SymbolPayload,
-    TextEditPayload, WorkspaceSymbolQueryPayload,
+    Position as BridgePosition, QueryPayload, RenamePayload, RenameResultPayload,
+    SemanticTokenPayload, SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
 };
 use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
 use push::{PushEvent, spawn_push_worker};
@@ -478,9 +478,15 @@ impl IsabelleLanguageServer {
             ));
         }
 
-        let edits = response
-            .text_edits_payload()
+        let RenameResultPayload { edits, warning } = response
+            .rename_result_payload()
             .map_err(|err| err.to_string())?;
+        if let Some(message) = warning {
+            self.client
+                .log_message(LspMessageType::WARNING, message)
+                .await;
+            return Ok(None);
+        }
         Ok(workspace_edit_from_payload(edits))
     }
 
