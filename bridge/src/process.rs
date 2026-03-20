@@ -1198,6 +1198,14 @@ impl RealAdapterState {
             dirs.push(parent);
         }
 
+        if let Some(parent) = parent_dir_from_file_uri(uri) {
+            for discovered in discover_session_roots(&parent) {
+                if !dirs.iter().any(|dir| dir == &discovered) {
+                    dirs.push(discovered);
+                }
+            }
+        }
+
         dirs
     }
 }
@@ -1729,6 +1737,17 @@ fn parent_dir_from_file_uri(uri: &str) -> Option<PathBuf> {
 
     let path = parsed.to_file_path().ok()?;
     path.parent().map(|parent| parent.to_path_buf())
+}
+
+fn discover_session_roots(start_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for ancestor in start_dir.ancestors() {
+        let has_root = ancestor.join("ROOT").is_file() || ancestor.join("ROOTS").is_file();
+        if has_root {
+            dirs.push(ancestor.to_path_buf());
+        }
+    }
+    dirs
 }
 
 fn sanitize_theory_name(name: &str) -> String {
@@ -3716,6 +3735,25 @@ Unfinished session(s): Draft
 
         let dirs = state.session_dirs_for_uri("file:///tmp/work/Example.thy");
         assert_eq!(dirs, vec![PathBuf::from("/tmp/work")]);
+    }
+
+    #[test]
+    fn session_dirs_for_uri_discovers_ancestor_root_markers() {
+        let temp = tempdir().expect("tempdir");
+        let project = temp.path().join("project");
+        let src = project.join("src");
+        std::fs::create_dir_all(&src).expect("create src");
+        std::fs::write(project.join("ROOT"), "session Demo = HOL\n").expect("write ROOT");
+
+        let theory = src.join("Example.thy");
+        std::fs::write(&theory, "theory Example imports Main begin\nend\n").expect("write theory");
+        let uri = Url::from_file_path(&theory).expect("file uri").to_string();
+
+        let state = RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        let dirs = state.session_dirs_for_uri(&uri);
+
+        assert!(dirs.iter().any(|dir| dir == &src));
+        assert!(dirs.iter().any(|dir| dir == &project));
     }
 
     #[tokio::test]
