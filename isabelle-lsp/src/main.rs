@@ -20,10 +20,12 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::Duration;
 use tower_lsp::jsonrpc::Result as JsonRpcResult;
+use tower_lsp::lsp_types::request::{GotoDeclarationParams, GotoDeclarationResponse};
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, CompletionItem, CompletionItemKind,
-    CompletionOptions, CompletionParams, CompletionResponse, DocumentSymbolParams,
+    CompletionOptions, CompletionParams, CompletionResponse, DeclarationCapability,
+    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentSymbolParams,
     DocumentSymbolResponse, ExecuteCommandOptions, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverProviderCapability, InitializeParams, InitializeResult,
     InitializedParams, Location, MarkedString, MessageType as LspMessageType, OneOf, Position,
@@ -322,6 +324,36 @@ impl IsabelleLanguageServer {
             .into_iter()
             .filter_map(bridge_location_to_lsp)
             .collect())
+    }
+
+    async fn document_highlights(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+    ) -> Result<Vec<DocumentHighlight>, String> {
+        let mut highlights = self
+            .reference_locations(uri, position, version)
+            .await?
+            .into_iter()
+            .filter(|location| location.uri == *uri)
+            .map(|location| DocumentHighlight {
+                range: location.range,
+                kind: Some(DocumentHighlightKind::TEXT),
+            })
+            .collect::<Vec<_>>();
+
+        highlights.sort_by(|a, b| {
+            a.range
+                .start
+                .line
+                .cmp(&b.range.start.line)
+                .then_with(|| a.range.start.character.cmp(&b.range.start.character))
+                .then_with(|| a.range.end.line.cmp(&b.range.end.line))
+                .then_with(|| a.range.end.character.cmp(&b.range.end.character))
+        });
+        highlights.dedup_by(|a, b| a.range == b.range);
+        Ok(highlights)
     }
 
     async fn completion_items(
@@ -638,7 +670,9 @@ impl LanguageServer for IsabelleLanguageServer {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                declaration_provider: Some(DeclarationCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
                     trigger_characters: Some(vec![".".to_string(), "_".to_string()]),
@@ -773,6 +807,29 @@ impl LanguageServer for IsabelleLanguageServer {
         }
     }
 
+    async fn goto_declaration(
+        &self,
+        params: GotoDeclarationParams,
+    ) -> JsonRpcResult<Option<GotoDeclarationResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.definition_locations(&uri, position, version).await {
+            Ok(locations) if locations.is_empty() => Ok(None),
+            Ok(locations) => Ok(Some(GotoDeclarationResponse::Array(locations))),
+            Err(err) => {
+                self.log_error(format!("failed to request declaration: {err}"))
+                    .await;
+                Ok(None)
+            }
+        }
+    }
+
     async fn references(&self, params: ReferenceParams) -> JsonRpcResult<Option<Vec<Location>>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
@@ -786,6 +843,28 @@ impl LanguageServer for IsabelleLanguageServer {
             Ok(locations) => Ok(Some(locations)),
             Err(err) => {
                 self.log_error(format!("failed to request references: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> JsonRpcResult<Option<Vec<DocumentHighlight>>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.document_highlights(&uri, position, version).await {
+            Ok(highlights) => Ok(Some(highlights)),
+            Err(err) => {
+                self.log_error(format!("failed to request document highlights: {err}"))
                     .await;
                 Ok(Some(Vec::new()))
             }
