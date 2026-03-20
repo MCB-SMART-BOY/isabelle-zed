@@ -26,16 +26,18 @@ use tower_lsp::lsp_types::request::{
 };
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CodeActionResponse, CompletionItem, CompletionItemKind,
-    CompletionOptions, CompletionParams, CompletionResponse, DeclarationCapability,
-    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
-    DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams, DocumentSymbolResponse,
-    ExecuteCommandOptions, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
+    CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions, CodeLensParams,
+    Command, CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
+    CompletionResponse, DeclarationCapability, DocumentHighlight, DocumentHighlightKind,
+    DocumentHighlightParams, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
+    DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandOptions, FoldingRange,
+    FoldingRangeParams, FoldingRangeProviderCapability, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
     ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    Location, MarkedString, MessageType as LspMessageType, OneOf, ParameterInformation,
-    ParameterLabel, Position, PrepareRenameResponse, Range as LspRange, ReferenceParams,
-    RenameOptions, RenameParams, SelectionRange, SelectionRangeParams,
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions, InlayHintParams,
+    InlayHintServerCapabilities, Location, MarkedString, MessageType as LspMessageType, OneOf,
+    ParameterInformation, ParameterLabel, Position, PrepareRenameResponse, Range as LspRange,
+    ReferenceParams, RenameOptions, RenameParams, SelectionRange, SelectionRangeParams,
     SelectionRangeProviderCapability, SemanticToken, SemanticTokenModifier, SemanticTokenType,
     SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
     SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
@@ -663,6 +665,25 @@ impl IsabelleLanguageServer {
         Ok(document_links_from_text(uri, &text))
     }
 
+    async fn code_lenses_for_uri(&self, uri: &Url) -> Vec<CodeLens> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        let session_running = self.is_session_running().await;
+        code_lenses_for_document(uri, &text, session_running)
+    }
+
+    async fn inlay_hints_for_uri_range(&self, uri: &Url, range: LspRange) -> Vec<InlayHint> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        inlay_hints_from_text(&text, range)
+    }
+
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
         if !self.is_session_running().await {
             return Err("isabelle session is stopped".to_string());
@@ -783,6 +804,15 @@ impl LanguageServer for IsabelleLanguageServer {
                     resolve_provider: Some(false),
                     work_done_progress_options: Default::default(),
                 }),
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
+                inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+                    InlayHintOptions {
+                        work_done_progress_options: Default::default(),
+                        resolve_provider: Some(false),
+                    },
+                ))),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
@@ -1090,6 +1120,18 @@ impl LanguageServer for IsabelleLanguageServer {
                 Ok(Some(Vec::new()))
             }
         }
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> JsonRpcResult<Option<Vec<CodeLens>>> {
+        let uri = params.text_document.uri;
+        Ok(Some(self.code_lenses_for_uri(&uri).await))
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> JsonRpcResult<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        Ok(Some(
+            self.inlay_hints_for_uri_range(&uri, params.range).await,
+        ))
     }
 
     async fn completion(
@@ -1418,6 +1460,171 @@ fn line_identifier_tokens(line: &str) -> Vec<String> {
         .into_iter()
         .map(|(token, _, _)| token)
         .collect()
+}
+
+fn first_non_empty_line_range(text: &str) -> LspRange {
+    for (line_index, line_text) in text.lines().enumerate() {
+        if line_text.trim().is_empty() {
+            continue;
+        }
+        let line = u32::try_from(line_index).unwrap_or(u32::MAX);
+        let end_character = u32::try_from(line_text.chars().count()).unwrap_or(u32::MAX);
+        return LspRange {
+            start: Position { line, character: 0 },
+            end: Position {
+                line,
+                character: end_character,
+            },
+        };
+    }
+
+    LspRange {
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: Position {
+            line: 0,
+            character: 0,
+        },
+    }
+}
+
+fn code_lenses_for_document(uri: &Url, text: &str, session_running: bool) -> Vec<CodeLens> {
+    let range = first_non_empty_line_range(text);
+    let session_command = if session_running {
+        Command {
+            title: "Stop Isabelle Session".to_string(),
+            command: COMMAND_STOP_SESSION.to_string(),
+            arguments: None,
+        }
+    } else {
+        Command {
+            title: "Start Isabelle Session".to_string(),
+            command: COMMAND_START_SESSION.to_string(),
+            arguments: None,
+        }
+    };
+
+    vec![
+        CodeLens {
+            range,
+            command: Some(Command {
+                title: "Run Isabelle Check".to_string(),
+                command: COMMAND_RUN_CHECK.to_string(),
+                arguments: Some(vec![serde_json::json!({ "uri": uri.as_str() })]),
+            }),
+            data: None,
+        },
+        CodeLens {
+            range,
+            command: Some(session_command),
+            data: None,
+        },
+    ]
+}
+
+fn inlay_hints_from_text(text: &str, range: LspRange) -> Vec<InlayHint> {
+    let mut hints = Vec::new();
+    for (line_index, line_text) in text.lines().enumerate() {
+        let line = u32::try_from(line_index).unwrap_or(u32::MAX);
+        if line < range.start.line || line > range.end.line {
+            continue;
+        }
+
+        let spans = line_identifier_spans(line_text);
+        if let Some((keyword, _, end)) = spans.first() {
+            match keyword.as_str() {
+                "lemma" | "theorem" | "corollary" | "proposition" => push_inlay_hint(
+                    &mut hints,
+                    Position {
+                        line,
+                        character: *end,
+                    },
+                    " : proposition".to_string(),
+                    Some(InlayHintKind::TYPE),
+                    &range,
+                ),
+                "definition" | "abbreviation" | "fun" | "function" | "primrec" => push_inlay_hint(
+                    &mut hints,
+                    Position {
+                        line,
+                        character: *end,
+                    },
+                    " : definition".to_string(),
+                    Some(InlayHintKind::TYPE),
+                    &range,
+                ),
+                _ => {}
+            }
+        }
+
+        for pair in spans.windows(2) {
+            let (prefix, _, _) = &pair[0];
+            let (_, start, _) = &pair[1];
+            let label = match prefix.as_str() {
+                "by" | "apply" => Some("method: "),
+                "using" => Some("facts: "),
+                "unfolding" => Some("defs: "),
+                _ => None,
+            };
+            if let Some(label) = label {
+                push_inlay_hint(
+                    &mut hints,
+                    Position {
+                        line,
+                        character: *start,
+                    },
+                    label.to_string(),
+                    Some(InlayHintKind::PARAMETER),
+                    &range,
+                );
+            }
+        }
+    }
+
+    hints.sort_by(|a, b| {
+        a.position
+            .line
+            .cmp(&b.position.line)
+            .then_with(|| a.position.character.cmp(&b.position.character))
+            .then_with(|| inlay_hint_label_text(&a.label).cmp(&inlay_hint_label_text(&b.label)))
+    });
+    hints.dedup_by(|a, b| {
+        a.position == b.position
+            && inlay_hint_label_text(&a.label) == inlay_hint_label_text(&b.label)
+    });
+    hints
+}
+
+fn push_inlay_hint(
+    hints: &mut Vec<InlayHint>,
+    position: Position,
+    label: String,
+    kind: Option<InlayHintKind>,
+    visible_range: &LspRange,
+) {
+    if !lsp_position_in_range(position, *visible_range) {
+        return;
+    }
+
+    hints.push(InlayHint {
+        position,
+        label: InlayHintLabel::String(label),
+        kind,
+        text_edits: None,
+        tooltip: None,
+        padding_left: Some(true),
+        padding_right: Some(true),
+        data: None,
+    });
+}
+
+fn inlay_hint_label_text(label: &InlayHintLabel) -> String {
+    match label {
+        InlayHintLabel::String(value) => value.clone(),
+        InlayHintLabel::LabelParts(parts) => parts.iter().map(|part| part.value.clone()).collect(),
+    }
 }
 
 fn folding_ranges_from_text(text: &str) -> Vec<FoldingRange> {
@@ -2244,6 +2451,84 @@ mod tests {
             links[0].target.as_ref().map(Url::as_str),
             Some("https://isabelle.in.tum.de/index.html")
         );
+    }
+
+    #[test]
+    fn code_lenses_include_run_check_and_session_stop_when_running() {
+        let uri = Url::parse("file:///tmp/Example.thy").expect("file url");
+        let text = "theory Example imports Main begin\nlemma demo: True by simp\nend\n";
+
+        let lenses = super::code_lenses_for_document(&uri, text, true);
+        assert_eq!(lenses.len(), 2);
+
+        let run_check = lenses
+            .iter()
+            .filter_map(|lens| lens.command.as_ref())
+            .find(|command| command.command == COMMAND_RUN_CHECK)
+            .expect("run check command");
+        assert_eq!(
+            run_check.arguments.as_ref().and_then(|args| args.first()),
+            Some(&json!({ "uri": uri.as_str() }))
+        );
+
+        let stop = lenses
+            .iter()
+            .filter_map(|lens| lens.command.as_ref())
+            .find(|command| command.command == COMMAND_STOP_SESSION)
+            .expect("stop session command");
+        assert_eq!(stop.title, "Stop Isabelle Session");
+    }
+
+    #[test]
+    fn code_lenses_include_start_when_session_not_running() {
+        let uri = Url::parse("file:///tmp/Example.thy").expect("file url");
+        let lenses =
+            super::code_lenses_for_document(&uri, "theory Example imports Main begin\n", false);
+
+        assert!(
+            lenses
+                .iter()
+                .filter_map(|lens| lens.command.as_ref())
+                .any(|command| command.command == COMMAND_START_SESSION)
+        );
+    }
+
+    #[test]
+    fn inlay_hints_emit_type_and_method_hints() {
+        let text = "lemma plus_comm: \"a + b = b + a\"\n  by simp\n";
+        let hints = super::inlay_hints_from_text(text, super::full_document_range(text));
+        let labels = hints
+            .iter()
+            .map(|hint| super::inlay_hint_label_text(&hint.label))
+            .collect::<Vec<_>>();
+
+        assert!(labels.iter().any(|label| label == " : proposition"));
+        assert!(labels.iter().any(|label| label == "method: "));
+    }
+
+    #[test]
+    fn inlay_hints_respect_requested_range() {
+        let text = "lemma plus_comm: \"a + b = b + a\"\n  by simp\n";
+        let hints = super::inlay_hints_from_text(
+            text,
+            LspRange {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 20,
+                },
+            },
+        );
+        let labels = hints
+            .iter()
+            .map(|hint| super::inlay_hint_label_text(&hint.label))
+            .collect::<Vec<_>>();
+
+        assert!(labels.iter().any(|label| label == "method: "));
+        assert!(!labels.iter().any(|label| label == " : proposition"));
     }
 
     #[cfg(unix)]
