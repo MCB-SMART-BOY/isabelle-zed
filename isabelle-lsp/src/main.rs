@@ -613,7 +613,33 @@ impl IsabelleLanguageServer {
         position: Position,
         version: i64,
     ) -> Result<Vec<Location>, String> {
-        self.definition_locations(uri, position, version).await
+        if !self.is_session_running().await {
+            return Ok(Vec::new());
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(QueryPayload {
+            uri: uri.to_string(),
+            offset: lsp_position_to_bridge(position),
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::TypeDefinition, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::TypeDefinition {
+            return self.definition_locations(uri, position, version).await;
+        }
+
+        let payload = response.location_payload().map_err(|err| err.to_string())?;
+        Ok(payload
+            .into_iter()
+            .filter_map(bridge_location_to_lsp)
+            .collect())
     }
 
     async fn implementation_locations(
@@ -622,7 +648,33 @@ impl IsabelleLanguageServer {
         position: Position,
         version: i64,
     ) -> Result<Vec<Location>, String> {
-        self.definition_locations(uri, position, version).await
+        if !self.is_session_running().await {
+            return Ok(Vec::new());
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(QueryPayload {
+            uri: uri.to_string(),
+            offset: lsp_position_to_bridge(position),
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::Implementation, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::Implementation {
+            return self.definition_locations(uri, position, version).await;
+        }
+
+        let payload = response.location_payload().map_err(|err| err.to_string())?;
+        Ok(payload
+            .into_iter()
+            .filter_map(bridge_location_to_lsp)
+            .collect())
     }
 
     async fn selection_ranges(

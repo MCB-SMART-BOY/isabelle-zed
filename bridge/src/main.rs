@@ -340,6 +340,8 @@ fn pending_uri_for_message(message: &Message) -> Option<String> {
             .ok()
             .map(|payload| payload.uri),
         MessageType::Definition
+        | MessageType::TypeDefinition
+        | MessageType::Implementation
         | MessageType::References
         | MessageType::Completion
         | MessageType::SignatureHelp => message.query_payload().ok().map(|payload| payload.uri),

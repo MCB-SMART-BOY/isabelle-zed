@@ -448,6 +448,18 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 Vec::<LocationPayload>::new(),
             )
             .map_err(|err| ProcessError::Protocol(err.to_string()))?,
+            MessageType::TypeDefinition => location_message_from_request(
+                &request,
+                MessageType::TypeDefinition,
+                Vec::<LocationPayload>::new(),
+            )
+            .map_err(|err| ProcessError::Protocol(err.to_string()))?,
+            MessageType::Implementation => location_message_from_request(
+                &request,
+                MessageType::Implementation,
+                Vec::<LocationPayload>::new(),
+            )
+            .map_err(|err| ProcessError::Protocol(err.to_string()))?,
             MessageType::References => location_message_from_request(
                 &request,
                 MessageType::References,
@@ -696,6 +708,83 @@ impl RealAdapterState {
                 declaration_symbols(&doc_text)
                     .into_iter()
                     .filter(|symbol| symbol.name == identifier)
+                    .map(move |symbol| LocationPayload {
+                        uri: doc_uri.clone(),
+                        range: symbol.range,
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        locations.sort_by(|a, b| {
+            location_priority_key(a, uri, focus_line)
+                .cmp(&location_priority_key(b, uri, focus_line))
+        });
+        locations.dedup_by(|a, b| location_identity(a) == location_identity(b));
+        locations
+    }
+
+    async fn type_definition_locations(&self, uri: &str, offset: Position) -> Vec<LocationPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+
+        let Some((identifier, _, _)) = identifier_at_position(
+            &text,
+            normalize_one_based(offset.line),
+            normalize_one_based(offset.col),
+        ) else {
+            return Vec::new();
+        };
+
+        let focus_line = i64::try_from(normalize_one_based(offset.line)).unwrap_or(i64::MAX);
+        let mut locations = self
+            .indexed_documents(uri)
+            .await
+            .into_iter()
+            .flat_map(|(doc_uri, doc_text)| {
+                declaration_symbols(&doc_text)
+                    .into_iter()
+                    .filter(|symbol| symbol.name == identifier && symbol.kind == "type")
+                    .map(move |symbol| LocationPayload {
+                        uri: doc_uri.clone(),
+                        range: symbol.range,
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        locations.sort_by(|a, b| {
+            location_priority_key(a, uri, focus_line)
+                .cmp(&location_priority_key(b, uri, focus_line))
+        });
+        locations.dedup_by(|a, b| location_identity(a) == location_identity(b));
+        locations
+    }
+
+    async fn implementation_locations(&self, uri: &str, offset: Position) -> Vec<LocationPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+
+        let Some((identifier, _, _)) = identifier_at_position(
+            &text,
+            normalize_one_based(offset.line),
+            normalize_one_based(offset.col),
+        ) else {
+            return Vec::new();
+        };
+
+        let focus_line = i64::try_from(normalize_one_based(offset.line)).unwrap_or(i64::MAX);
+        let mut locations = self
+            .indexed_documents(uri)
+            .await
+            .into_iter()
+            .flat_map(|(doc_uri, doc_text)| {
+                declaration_symbols(&doc_text)
+                    .into_iter()
+                    .filter(|symbol| {
+                        symbol.name == identifier
+                            && matches!(symbol.kind.as_str(), "function" | "theorem" | "module")
+                    })
                     .map(move |symbol| LocationPayload {
                         uri: doc_uri.clone(),
                         range: symbol.range,
@@ -1191,6 +1280,24 @@ pub async fn run_real_adapter(
                     .definition_locations(&payload.uri, payload.offset)
                     .await;
                 location_message_from_request(&request, MessageType::Definition, locations)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::TypeDefinition => {
+                let payload: QueryPayload = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let locations = state
+                    .type_definition_locations(&payload.uri, payload.offset)
+                    .await;
+                location_message_from_request(&request, MessageType::TypeDefinition, locations)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::Implementation => {
+                let payload: QueryPayload = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let locations = state
+                    .implementation_locations(&payload.uri, payload.offset)
+                    .await;
+                location_message_from_request(&request, MessageType::Implementation, locations)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::References => {
@@ -3215,6 +3322,50 @@ Unfinished session(s): Draft
         assert!(!locations.is_empty());
         assert_eq!(locations[0].uri, uri_b);
         assert_eq!(locations[0].range.start.line, 2);
+    }
+
+    #[tokio::test]
+    async fn type_definition_locations_filter_non_type_symbols() {
+        let uri = "file:///tmp/Example.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: "theory Example imports Main begin\ntype_synonym foo = nat\ndefinition foo where \"foo = (0::nat)\"\nlemma use: foo = foo by simp\nend\n"
+                    .to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let locations = state
+            .type_definition_locations(uri, Position { line: 4, col: 12 })
+            .await;
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].range.start.line, 2);
+    }
+
+    #[tokio::test]
+    async fn implementation_locations_filter_type_symbols() {
+        let uri = "file:///tmp/Example.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: "theory Example imports Main begin\ntype_synonym foo = nat\ndefinition foo where \"foo = (0::nat)\"\nlemma use: foo = foo by simp\nend\n"
+                    .to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let locations = state
+            .implementation_locations(uri, Position { line: 4, col: 12 })
+            .await;
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].range.start.line, 3);
     }
 
     #[tokio::test]

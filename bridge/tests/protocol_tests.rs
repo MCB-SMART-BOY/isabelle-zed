@@ -148,3 +148,17 @@ fn on_type_formatting_payload_decodes_position_and_character() {
     assert_eq!(payload.offset.col, 5);
     assert_eq!(payload.ch, "\n");
 }
+
+#[test]
+fn type_definition_payload_decodes_query() {
+    let raw = r#"{"id":"msg-0008","type":"type_definition","session":"s1","version":1,"payload":{"uri":"file:///tmp/Example.thy","offset":{"line":3,"col":7}}}"#;
+    let message = parse_message(raw).expect("type_definition payload should parse");
+    assert_eq!(message.msg_type, MessageType::TypeDefinition);
+
+    let payload = message
+        .query_payload()
+        .expect("query payload should decode");
+    assert_eq!(payload.uri, "file:///tmp/Example.thy");
+    assert_eq!(payload.offset.line, 3);
+    assert_eq!(payload.offset.col, 7);
+}

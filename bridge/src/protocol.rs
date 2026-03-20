@@ -12,6 +12,10 @@ pub enum MessageType {
     DocumentCheck,
     #[serde(rename = "definition")]
     Definition,
+    #[serde(rename = "type_definition")]
+    TypeDefinition,
+    #[serde(rename = "implementation")]
+    Implementation,
     #[serde(rename = "references")]
     References,
     #[serde(rename = "completion")]
