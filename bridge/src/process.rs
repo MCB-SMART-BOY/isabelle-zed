@@ -657,7 +657,9 @@ impl RealAdapterState {
             return Vec::new();
         };
 
-        self.indexed_documents(uri)
+        let focus_line = i64::try_from(normalize_one_based(offset.line)).unwrap_or(i64::MAX);
+        let mut locations = self
+            .indexed_documents(uri)
             .await
             .into_iter()
             .flat_map(|(doc_uri, doc_text)| {
@@ -669,7 +671,14 @@ impl RealAdapterState {
                         range: symbol.range,
                     })
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        locations.sort_by(|a, b| {
+            location_priority_key(a, uri, focus_line)
+                .cmp(&location_priority_key(b, uri, focus_line))
+        });
+        locations.dedup_by(|a, b| location_identity(a) == location_identity(b));
+        locations
     }
 
     async fn reference_locations(&self, uri: &str, offset: Position) -> Vec<LocationPayload> {
@@ -685,8 +694,23 @@ impl RealAdapterState {
             return Vec::new();
         };
 
-        self.indexed_documents(uri)
-            .await
+        let docs = self.indexed_documents(uri).await;
+        let declaration_locations = docs
+            .iter()
+            .flat_map(|(doc_uri, doc_text)| {
+                declaration_symbols(doc_text)
+                    .into_iter()
+                    .filter(|symbol| symbol.name == identifier)
+                    .map(|symbol| LocationPayload {
+                        uri: doc_uri.clone(),
+                        range: symbol.range,
+                    })
+            })
+            .map(|location| location_identity(&location))
+            .collect::<HashSet<_>>();
+
+        let focus_line = i64::try_from(normalize_one_based(offset.line)).unwrap_or(i64::MAX);
+        let mut locations = docs
             .into_iter()
             .flat_map(|(doc_uri, doc_text)| {
                 identifier_ranges(&doc_text, &identifier)
@@ -696,7 +720,15 @@ impl RealAdapterState {
                         range,
                     })
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        locations.sort_by(|a, b| {
+            reference_priority_key(a, uri, focus_line, &declaration_locations).cmp(
+                &reference_priority_key(b, uri, focus_line, &declaration_locations),
+            )
+        });
+        locations.dedup_by(|a, b| location_identity(a) == location_identity(b));
+        locations
     }
 
     async fn completion_items(&self, uri: &str, offset: Position) -> Vec<CompletionItemPayload> {
@@ -818,7 +850,9 @@ impl RealAdapterState {
             return Vec::new();
         };
 
-        self.indexed_documents(uri)
+        let focus_line = i64::try_from(normalize_one_based(offset.line)).unwrap_or(i64::MAX);
+        let mut edits = self
+            .indexed_documents(uri)
             .await
             .into_iter()
             .flat_map(|(doc_uri, doc_text)| {
@@ -831,7 +865,16 @@ impl RealAdapterState {
                         new_text: replacement.clone(),
                     })
             })
-            .collect()
+            .collect::<Vec<_>>();
+
+        edits.sort_by(|a, b| {
+            text_edit_priority_key(a, uri, focus_line)
+                .cmp(&text_edit_priority_key(b, uri, focus_line))
+        });
+        edits.dedup_by(|a, b| {
+            text_edit_identity(a) == text_edit_identity(b) && a.new_text == b.new_text
+        });
+        edits
     }
 
     async fn code_actions(&self, uri: &str) -> Vec<CodeActionPayload> {
@@ -1717,6 +1760,107 @@ fn document_end_position(text: &str) -> Position {
     }
 }
 
+fn abs_i64_diff(lhs: i64, rhs: i64) -> i64 {
+    if lhs >= rhs {
+        lhs.saturating_sub(rhs)
+    } else {
+        rhs.saturating_sub(lhs)
+    }
+}
+
+fn location_identity(location: &LocationPayload) -> (String, i64, i64, i64, i64) {
+    (
+        location.uri.clone(),
+        location.range.start.line,
+        location.range.start.col,
+        location.range.end.line,
+        location.range.end.col,
+    )
+}
+
+fn location_priority_key(
+    location: &LocationPayload,
+    focus_uri: &str,
+    focus_line: i64,
+) -> (u8, u8, i64, String, i64, i64) {
+    let is_same_uri = location.uri == focus_uri;
+    let same_uri_rank = if is_same_uri { 0 } else { 1 };
+    let local_before_cursor_rank = if is_same_uri && location.range.start.line <= focus_line {
+        0
+    } else {
+        1
+    };
+    let local_line_distance = if is_same_uri {
+        abs_i64_diff(location.range.start.line, focus_line)
+    } else {
+        i64::MAX
+    };
+
+    (
+        same_uri_rank,
+        local_before_cursor_rank,
+        local_line_distance,
+        location.uri.clone(),
+        location.range.start.line,
+        location.range.start.col,
+    )
+}
+
+fn reference_priority_key(
+    location: &LocationPayload,
+    focus_uri: &str,
+    focus_line: i64,
+    declaration_locations: &HashSet<(String, i64, i64, i64, i64)>,
+) -> (u8, u8, i64, String, i64, i64) {
+    let is_declaration = declaration_locations.contains(&location_identity(location));
+    let declaration_rank = if is_declaration { 0 } else { 1 };
+    let same_uri_rank = if location.uri == focus_uri { 0 } else { 1 };
+    let local_line_distance = if same_uri_rank == 0 {
+        abs_i64_diff(location.range.start.line, focus_line)
+    } else {
+        i64::MAX
+    };
+
+    (
+        declaration_rank,
+        same_uri_rank,
+        local_line_distance,
+        location.uri.clone(),
+        location.range.start.line,
+        location.range.start.col,
+    )
+}
+
+fn text_edit_identity(edit: &TextEditPayload) -> (String, i64, i64, i64, i64) {
+    (
+        edit.uri.clone(),
+        edit.range.start.line,
+        edit.range.start.col,
+        edit.range.end.line,
+        edit.range.end.col,
+    )
+}
+
+fn text_edit_priority_key(
+    edit: &TextEditPayload,
+    focus_uri: &str,
+    focus_line: i64,
+) -> (u8, i64, String, i64, i64) {
+    let same_uri_rank = if edit.uri == focus_uri { 0 } else { 1 };
+    let local_line_distance = if same_uri_rank == 0 {
+        abs_i64_diff(edit.range.start.line, focus_line)
+    } else {
+        i64::MAX
+    };
+    (
+        same_uri_rank,
+        local_line_distance,
+        edit.uri.clone(),
+        edit.range.start.line,
+        edit.range.start.col,
+    )
+}
+
 fn identifier_tokens_by_line(text: &str) -> Vec<Vec<(String, usize, usize)>> {
     let mut by_line = Vec::new();
     let mut comment_depth = 0usize;
@@ -2098,6 +2242,38 @@ Unfinished session(s): Draft
     }
 
     #[tokio::test]
+    async fn definition_locations_prioritizes_local_declaration() {
+        let uri_a = "file:///tmp/A.thy";
+        let uri_b = "file:///tmp/B.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri_a.to_string(),
+            CachedDocument {
+                text: "theory A imports Main begin\nlemma foo: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_b.to_string(),
+            CachedDocument {
+                text: "theory B imports A begin\nlemma foo: True by simp\nlemma use: foo by simp\nend\n"
+                    .to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let locations = state
+            .definition_locations(uri_b, Position { line: 3, col: 13 })
+            .await;
+        assert!(!locations.is_empty());
+        assert_eq!(locations[0].uri, uri_b);
+        assert_eq!(locations[0].range.start.line, 2);
+    }
+
+    #[tokio::test]
     async fn rename_edits_include_related_cached_documents() {
         let uri_a = "file:///tmp/A.thy";
         let uri_b = "file:///tmp/B.thy";
@@ -2125,6 +2301,36 @@ Unfinished session(s): Draft
             .await;
         assert!(edits.iter().any(|edit| edit.uri == uri_a));
         assert!(edits.iter().any(|edit| edit.uri == uri_b));
+    }
+
+    #[tokio::test]
+    async fn rename_edits_prioritizes_local_edits() {
+        let uri_a = "file:///tmp/A.thy";
+        let uri_b = "file:///tmp/B.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri_a.to_string(),
+            CachedDocument {
+                text: "theory A imports Main begin\nlemma foo: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_b.to_string(),
+            CachedDocument {
+                text: "theory B imports A begin\nlemma use_foo: foo by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let edits = state
+            .rename_edits(uri_b, Position { line: 2, col: 16 }, "bar".to_string())
+            .await;
+        assert!(!edits.is_empty());
+        assert_eq!(edits[0].uri, uri_b);
     }
 
     #[tokio::test]
@@ -2165,6 +2371,29 @@ Unfinished session(s): Draft
         assert!(locations.iter().any(|location| location.uri == uri_a));
         assert!(locations.iter().any(|location| location.uri == uri_b));
         assert!(!locations.iter().any(|location| location.uri == uri_c));
+    }
+
+    #[tokio::test]
+    async fn reference_locations_prioritizes_declaration_before_usage() {
+        let uri = "file:///tmp/Example.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: "theory Example imports Main begin\nlemma foo: True by simp\nlemma use: foo by simp\nend\n"
+                    .to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let locations = state
+            .reference_locations(uri, Position { line: 3, col: 13 })
+            .await;
+        assert!(!locations.is_empty());
+        assert_eq!(locations[0].uri, uri);
+        assert_eq!(locations[0].range.start.line, 2);
     }
 
     #[tokio::test]
