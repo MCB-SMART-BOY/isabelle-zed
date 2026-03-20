@@ -24,6 +24,8 @@ pub enum MessageType {
     CodeAction,
     #[serde(rename = "semantic_tokens")]
     SemanticTokens,
+    #[serde(rename = "workspace.symbols")]
+    WorkspaceSymbols,
     #[serde(rename = "diagnostics")]
     Diagnostics,
     #[serde(rename = "markup")]
@@ -82,6 +84,12 @@ pub struct RenamePayload {
 #[serde(deny_unknown_fields)]
 pub struct DocumentUriPayload {
     pub uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSymbolQueryPayload {
+    pub query: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -247,6 +255,12 @@ impl Message {
     pub fn semantic_tokens_payload(&self) -> Result<Vec<SemanticTokenPayload>, ProtocolError> {
         self.payload_as()
     }
+
+    pub fn workspace_symbol_query_payload(
+        &self,
+    ) -> Result<WorkspaceSymbolQueryPayload, ProtocolError> {
+        self.payload_as()
+    }
 }
 
 pub fn diagnostics_message_from_request(
@@ -372,5 +386,18 @@ pub fn semantic_tokens_message_from_request(
         session: request.session.clone(),
         version: request.version,
         payload: serde_json::to_value(tokens)?,
+    })
+}
+
+pub fn workspace_symbols_message_from_request(
+    request: &Message,
+    symbols: Vec<SymbolPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::WorkspaceSymbols,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(symbols)?,
     })
 }

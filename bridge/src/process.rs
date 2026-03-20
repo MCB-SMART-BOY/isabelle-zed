@@ -1,11 +1,11 @@
 use crate::protocol::{
     CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentUriPayload, LocationPayload,
     Message, MessageType, Position, QueryPayload, Range, RenamePayload, SemanticTokenPayload,
-    Severity, SymbolPayload, TextEditPayload, code_actions_message_from_request,
-    completion_message_from_request, diagnostics_message_from_request,
-    location_message_from_request, markup_message_from_request, parse_message,
-    semantic_tokens_message_from_request, symbols_message_from_request,
-    text_edits_message_from_request, to_ndjson,
+    Severity, SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
+    code_actions_message_from_request, completion_message_from_request,
+    diagnostics_message_from_request, location_message_from_request, markup_message_from_request,
+    parse_message, semantic_tokens_message_from_request, symbols_message_from_request,
+    text_edits_message_from_request, to_ndjson, workspace_symbols_message_from_request,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -470,6 +470,10 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 semantic_tokens_message_from_request(&request, Vec::<SemanticTokenPayload>::new())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
+            MessageType::WorkspaceSymbols => {
+                workspace_symbols_message_from_request(&request, Vec::<SymbolPayload>::new())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
             MessageType::Diagnostics => {
                 continue;
             }
@@ -723,6 +727,38 @@ impl RealAdapterState {
                 range: symbol.range,
             })
             .collect()
+    }
+
+    async fn workspace_symbols(&self, query: &str) -> Vec<SymbolPayload> {
+        let normalized_query = query.trim().to_ascii_lowercase();
+        let mut symbols = self
+            .latest_documents
+            .iter()
+            .flat_map(|(uri, cached)| {
+                declaration_symbols(&cached.text)
+                    .into_iter()
+                    .map(|symbol| SymbolPayload {
+                        uri: uri.clone(),
+                        name: symbol.name,
+                        kind: symbol.kind,
+                        range: symbol.range,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|symbol| {
+                normalized_query.is_empty()
+                    || symbol.name.to_ascii_lowercase().contains(&normalized_query)
+            })
+            .collect::<Vec<_>>();
+
+        symbols.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.uri.cmp(&b.uri))
+                .then_with(|| a.range.start.line.cmp(&b.range.start.line))
+                .then_with(|| a.range.start.col.cmp(&b.range.start.col))
+        });
+        symbols
     }
 
     async fn semantic_tokens(&self, uri: &str) -> Vec<SemanticTokenPayload> {
@@ -1038,6 +1074,14 @@ pub async fn run_real_adapter(
                         .map_err(|err| ProcessError::Protocol(err.to_string()))?;
                 let tokens = state.semantic_tokens(&payload.uri).await;
                 semantic_tokens_message_from_request(&request, tokens)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::WorkspaceSymbols => {
+                let payload: WorkspaceSymbolQueryPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let symbols = state.workspace_symbols(&payload.query).await;
+                workspace_symbols_message_from_request(&request, symbols)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::Diagnostics => {
@@ -1745,6 +1789,38 @@ Unfinished session(s): Draft
                 .iter()
                 .any(|token| token.token_type == "function" && token.line == 2)
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_symbols_collects_and_filters_across_documents() {
+        let uri_a = "file:///tmp/A.thy";
+        let uri_b = "file:///tmp/B.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri_a.to_string(),
+            CachedDocument {
+                text: "theory A imports Main begin\nlemma alpha: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_b.to_string(),
+            CachedDocument {
+                text: "theory B imports Main begin\ndefinition beta where \"beta = True\"\nend\n"
+                    .to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let all = state.workspace_symbols("").await;
+        assert!(all.iter().any(|symbol| symbol.name == "alpha"));
+        assert!(all.iter().any(|symbol| symbol.name == "beta"));
+
+        let filtered = state.workspace_symbols("alp").await;
+        assert!(filtered.iter().all(|symbol| symbol.name == "alpha"));
     }
 
     #[tokio::test]

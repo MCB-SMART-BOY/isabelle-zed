@@ -9,7 +9,7 @@ use bridge::protocol::{
     CodeActionPayload as BridgeCodeActionPayload, CompletionItemPayload, DocumentCheckPayload,
     DocumentUriPayload, LocationPayload, MarkupPayload, Message, MessageType,
     Position as BridgePosition, QueryPayload, RenamePayload, SemanticTokenPayload, SymbolPayload,
-    TextEditPayload,
+    TextEditPayload, WorkspaceSymbolQueryPayload,
 };
 use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
 use push::{PushEvent, spawn_push_worker};
@@ -32,7 +32,7 @@ use tower_lsp::lsp_types::{
     SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, SymbolInformation,
     SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
+    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info};
@@ -509,6 +509,34 @@ impl IsabelleLanguageServer {
         Ok(bridge_semantic_tokens_to_lsp(payload))
     }
 
+    async fn workspace_symbols(&self, query: String) -> Result<Vec<SymbolInformation>, String> {
+        if !self.is_session_running().await {
+            return Ok(Vec::new());
+        }
+
+        let payload = serde_json::to_value(WorkspaceSymbolQueryPayload { query })
+            .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::WorkspaceSymbols, 1, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::WorkspaceSymbols {
+            return Err(format!(
+                "unexpected response type from bridge: {:?}",
+                response.msg_type
+            ));
+        }
+
+        let payload = response.symbols_payload().map_err(|err| err.to_string())?;
+        Ok(payload
+            .into_iter()
+            .filter_map(bridge_symbol_to_lsp)
+            .collect())
+    }
+
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
         if !self.is_session_running().await {
             return Err("isabelle session is stopped".to_string());
@@ -629,6 +657,7 @@ impl LanguageServer for IsabelleLanguageServer {
                         },
                     ),
                 ),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
                         COMMAND_START_SESSION.to_string(),
@@ -802,6 +831,20 @@ impl LanguageServer for IsabelleLanguageServer {
                 self.log_error(format!("failed to request document symbols: {err}"))
                     .await;
                 Ok(Some(DocumentSymbolResponse::Flat(Vec::new())))
+            }
+        }
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> JsonRpcResult<Option<Vec<SymbolInformation>>> {
+        match self.workspace_symbols(params.query).await {
+            Ok(symbols) => Ok(Some(symbols)),
+            Err(err) => {
+                self.log_error(format!("failed to request workspace symbols: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
             }
         }
     }
