@@ -149,10 +149,9 @@ fn native_default_args(settings_json: &Option<Value>, worktree: &zed::Worktree) 
     }
 
     let mut session_dirs = setting_string_array(settings_json, SETTINGS_KEY_NATIVE_SESSION_DIRS);
-    if worktree_has_session_root(worktree) {
-        let root = worktree.root_path();
-        if !session_dirs.iter().any(|dir| dir == &root) {
-            session_dirs.push(root);
+    for auto_dir in session_logic::auto_session_dirs_from_root(worktree) {
+        if !session_dirs.iter().any(|dir| dir == &auto_dir) {
+            session_dirs.push(auto_dir);
         }
     }
 
@@ -166,10 +165,6 @@ fn native_default_args(settings_json: &Option<Value>, worktree: &zed::Worktree) 
     }
 
     args
-}
-
-fn worktree_has_session_root(worktree: &zed::Worktree) -> bool {
-    worktree.read_text_file("ROOT").is_ok() || worktree.read_text_file("ROOTS").is_ok()
 }
 
 fn resolve_environment(

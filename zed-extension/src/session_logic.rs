@@ -35,6 +35,29 @@ pub(crate) fn auto_logic_from_root(worktree: &zed::Worktree) -> Option<String> {
     pick_auto_logic(&sessions)
 }
 
+pub(crate) fn auto_session_dirs_from_root(worktree: &zed::Worktree) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let worktree_root = worktree.root_path();
+
+    if worktree.read_text_file("ROOT").is_ok() || worktree.read_text_file("ROOTS").is_ok() {
+        dirs.push(worktree_root.clone());
+    }
+
+    if let Ok(roots) = worktree.read_text_file("ROOTS") {
+        for line in roots.lines() {
+            let Some(root_entry) = parse_roots_line(line) else {
+                continue;
+            };
+            let resolved = resolve_roots_entry_dir(&worktree_root, &root_entry);
+            if !dirs.contains(&resolved) {
+                dirs.push(resolved);
+            }
+        }
+    }
+
+    dirs
+}
+
 pub(crate) fn pick_auto_logic(sessions: &[SessionInfo]) -> Option<String> {
     let root_names = unique_session_names(
         sessions
@@ -200,4 +223,47 @@ fn tokenize_root_line(line: &str) -> Vec<String> {
         tokens.push(token);
     }
     tokens
+}
+
+fn resolve_roots_entry_dir(worktree_root: &str, root_entry: &str) -> String {
+    let entry_path = std::path::Path::new(root_entry);
+    if entry_path.is_absolute() {
+        return root_entry.to_string();
+    }
+
+    std::path::Path::new(worktree_root)
+        .join(entry_path)
+        .to_string_lossy()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_roots_entry_dir;
+
+    #[test]
+    fn resolves_relative_roots_entry_against_worktree_root() {
+        let worktree_root = std::path::Path::new("tmp").join("worktree");
+        let worktree_root = worktree_root.to_string_lossy().to_string();
+        let resolved = resolve_roots_entry_dir(&worktree_root, "src/logic");
+        let expected = std::path::Path::new(&worktree_root)
+            .join("src/logic")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(resolved, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_absolute_roots_entry_on_unix() {
+        let resolved = resolve_roots_entry_dir("/tmp/worktree", "/opt/isabelle/src");
+        assert_eq!(resolved, "/opt/isabelle/src");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn preserves_absolute_roots_entry_on_windows() {
+        let resolved = resolve_roots_entry_dir("C:\\worktree", "D:\\isabelle\\src");
+        assert_eq!(resolved, "D:\\isabelle\\src");
+    }
 }
