@@ -29,12 +29,13 @@ use tower_lsp::lsp_types::{
     DocumentSymbolResponse, ExecuteCommandOptions, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverProviderCapability, InitializeParams, InitializeResult,
     InitializedParams, Location, MarkedString, MessageType as LspMessageType, OneOf, Position,
-    Range as LspRange, ReferenceParams, RenameParams, SemanticToken, SemanticTokenModifier,
-    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, SymbolInformation,
-    SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit, WorkspaceSymbolParams,
+    PrepareRenameResponse, Range as LspRange, ReferenceParams, RenameOptions, RenameParams,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
+    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
+    WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info};
@@ -354,6 +355,21 @@ impl IsabelleLanguageServer {
         });
         highlights.dedup_by(|a, b| a.range == b.range);
         Ok(highlights)
+    }
+
+    async fn rename_target_range(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+    ) -> Result<Option<LspRange>, String> {
+        let locations = self.reference_locations(uri, position, version).await?;
+        Ok(locations
+            .into_iter()
+            .find(|location| {
+                location.uri == *uri && lsp_position_in_range(position, location.range)
+            })
+            .map(|location| location.range))
     }
 
     async fn completion_items(
@@ -679,7 +695,10 @@ impl LanguageServer for IsabelleLanguageServer {
                     ..CompletionOptions::default()
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                rename_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: Default::default(),
+                })),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -928,6 +947,29 @@ impl LanguageServer for IsabelleLanguageServer {
         }
     }
 
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> JsonRpcResult<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let position = params.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.rename_target_range(&uri, position, version).await {
+            Ok(Some(range)) => Ok(Some(PrepareRenameResponse::Range(range))),
+            Ok(None) => Ok(None),
+            Err(err) => {
+                self.log_error(format!("failed to prepare rename: {err}"))
+                    .await;
+                Ok(None)
+            }
+        }
+    }
+
     async fn rename(&self, params: RenameParams) -> JsonRpcResult<Option<WorkspaceEdit>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
@@ -1037,6 +1079,19 @@ impl LanguageServer for IsabelleLanguageServer {
     async fn shutdown(&self) -> JsonRpcResult<()> {
         Ok(())
     }
+}
+
+fn lsp_position_in_range(position: Position, range: LspRange) -> bool {
+    if position.line < range.start.line || position.line > range.end.line {
+        return false;
+    }
+    if position.line == range.start.line && position.character < range.start.character {
+        return false;
+    }
+    if position.line == range.end.line && position.character > range.end.character {
+        return false;
+    }
+    true
 }
 
 fn command_target_uri(argument: Option<&Value>) -> Option<String> {
@@ -1315,8 +1370,8 @@ async fn main() {
 mod tests {
     use super::*;
     use bridge::protocol::{
-        Diagnostic as BridgeDiagnostic, Message, Position, Range, Severity,
-        diagnostics_message_from_request, parse_message, to_ndjson,
+        Diagnostic as BridgeDiagnostic, Message, Position as BridgePosition, Range as BridgeRange,
+        Severity, diagnostics_message_from_request, parse_message, to_ndjson,
     };
     use serde_json::json;
     #[cfg(unix)]
@@ -1332,9 +1387,9 @@ mod tests {
     fn converts_bridge_diagnostic_to_lsp() {
         let diagnostic = BridgeDiagnostic {
             uri: "file:///tmp/example.thy".to_string(),
-            range: Range {
-                start: Position { line: 1, col: 2 },
-                end: Position { line: 3, col: 4 },
+            range: BridgeRange {
+                start: BridgePosition { line: 1, col: 2 },
+                end: BridgePosition { line: 3, col: 4 },
             },
             severity: Severity::Warning,
             message: "warning message".to_string(),
@@ -1347,6 +1402,62 @@ mod tests {
         assert_eq!(mapped.range.end.line, 2);
         assert_eq!(mapped.range.end.character, 3);
         assert_eq!(mapped.message, "warning message");
+    }
+
+    #[test]
+    fn lsp_position_in_range_accepts_boundaries() {
+        let range = LspRange {
+            start: Position {
+                line: 2,
+                character: 4,
+            },
+            end: Position {
+                line: 2,
+                character: 10,
+            },
+        };
+        assert!(super::lsp_position_in_range(
+            Position {
+                line: 2,
+                character: 4,
+            },
+            range
+        ));
+        assert!(super::lsp_position_in_range(
+            Position {
+                line: 2,
+                character: 10,
+            },
+            range
+        ));
+    }
+
+    #[test]
+    fn lsp_position_in_range_rejects_outside() {
+        let range = LspRange {
+            start: Position {
+                line: 2,
+                character: 4,
+            },
+            end: Position {
+                line: 2,
+                character: 10,
+            },
+        };
+        assert!(!super::lsp_position_in_range(
+            Position {
+                line: 2,
+                character: 3,
+            },
+            range
+        ));
+        assert!(!super::lsp_position_in_range(
+            Position {
+                line: 2,
+                character: 11,
+            },
+            range
+        ));
     }
 
     #[cfg(unix)]
