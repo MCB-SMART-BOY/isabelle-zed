@@ -25,10 +25,16 @@ All notable changes to this project are documented in this file.
 - bridge real-adapter `markup` now returns syntax-level hover context (identifier/range/line text) instead of a placeholder message.
 - `isabelle-zed-lsp` now converts hover positions from LSP 0-based to bridge 1-based before forwarding.
 - bridge real-adapter now supports repeatable `--session-dir` (mapped to `process_theories -d`) and auto-adds the checked file's parent directory to session lookup paths.
+- bridge real-adapter now discovers ancestor `ROOT`/`ROOTS` markers from the checked file path and auto-adds those roots as session lookup directories.
 - bridge real-adapter now caches diagnostics by in-memory document content/version, avoiding redundant `process_theories` runs for unchanged text.
+- bridge hover output now includes a heuristic `Proof Goal` section (context + goal + scope) for theorem/proof blocks.
 - added `cargo run -p isabelle-zed-xtask -- bridge-real-smoke` for local real-adapter smoke validation against malformed theory input.
 - bridge now supports `--tcp <host:port>` listener mode in addition to Unix `--socket`.
 - added cross-platform `cargo run -p isabelle-zed-xtask -- mock-lsp-e2e-tcp` and wired it into CI (Linux + Windows) to validate endpoint transport path.
+- `isabelle-zed-lsp` now supports `semanticTokens/range` and `semanticTokens/full/delta` with result-id cache and delta edits.
+- `isabelle-zed-lsp` now supports call hierarchy (`prepareCallHierarchy`, incoming/outgoing calls).
+- `isabelle-zed-lsp` now adds `isabelle.show_goal` command and theorem code lens entry (`Show Proof Goal`).
+- native extension startup now auto-adds `ROOTS`-listed directories to `vscode_server -d` session dirs.
 
 ### Removed
 

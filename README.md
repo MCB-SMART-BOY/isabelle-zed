@@ -97,6 +97,7 @@ cargo run -p isabelle-zed-xtask -- uninstall-zed-shortcuts
 
 - 诊断信息：使用 Zed 的标准 Diagnostics（红线、Problems）
 - 任务输出：显示在 Zed 终端/任务输出视图
+- bridge 模式下支持 `Show Proof Goal` Code Lens（定理行）与 hover 中的 `Proof Goal (heuristic)` 提示
 - 当前 Zed 扩展 API 无法提供自定义侧边 Proof 面板（后续 API 支持后可补）
 
 ### 可选配置示例
@@ -118,7 +119,8 @@ Native 可选设置：
 
 Native 模式行为提示：
 
-- 如果工作区根目录存在 `ROOT` 或 `ROOTS`，会自动附加 `-d <worktree-root>` 以便加载 session。
+- 如果工作区根目录存在 `ROOT` 或 `ROOTS`，会自动附加 `-d <worktree-root>`。
+- 若根目录 `ROOTS` 列出了额外目录，也会自动把这些目录追加为 `-d <dir>`。
 
 自动选择 `-l <logic>` 的优先级（从上到下匹配）：
 1. 若工作区根目录 `ROOT` 里仅定义了一个 session，则使用该 session。
@@ -317,6 +319,7 @@ Visual output model:
 
 - diagnostics: standard Zed diagnostics UI (squiggles/problems)
 - task output: Zed terminal/task output view
+- bridge mode includes theorem-level `Show Proof Goal` code lenses and hover `Proof Goal (heuristic)` hints
 - custom proof side panel is not currently possible with the public Zed extension API
 
 ### Optional settings examples
@@ -339,6 +342,7 @@ Optional native settings:
 Native mode behavior note:
 
 - If `ROOT` or `ROOTS` exists at worktree root, the extension auto-adds `-d <worktree-root>` for session discovery.
+- If root `ROOTS` lists additional directories, those entries are also auto-appended as `-d <dir>`.
 
 Auto-selected `-l <logic>` priority (first match wins):
 1. If worktree root `ROOT` defines exactly one session, use it.
