@@ -364,6 +364,18 @@ fn pending_uri_for_message(message: &Message) -> Option<String> {
             .document_uri_payload()
             .ok()
             .map(|payload| payload.uri),
+        MessageType::DocumentFormatting => message
+            .document_formatting_payload()
+            .ok()
+            .map(|payload| payload.uri),
+        MessageType::RangeFormatting => message
+            .range_formatting_payload()
+            .ok()
+            .map(|payload| payload.uri),
+        MessageType::OnTypeFormatting => message
+            .on_type_formatting_payload()
+            .ok()
+            .map(|payload| payload.uri),
         MessageType::WorkspaceSymbols => None,
         MessageType::DocumentPush | MessageType::Diagnostics => None,
     }

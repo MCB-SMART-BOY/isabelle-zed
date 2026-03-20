@@ -112,7 +112,10 @@ async fn start_tcp_mock_adapter() -> (String, JoinHandle<()>) {
                 | MessageType::WorkspaceSymbols
                 | MessageType::SignatureHelp
                 | MessageType::DocumentLinks
-                | MessageType::InlayHints => continue,
+                | MessageType::InlayHints
+                | MessageType::DocumentFormatting
+                | MessageType::RangeFormatting
+                | MessageType::OnTypeFormatting => continue,
                 MessageType::Diagnostics => continue,
             };
 

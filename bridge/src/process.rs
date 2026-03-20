@@ -1,14 +1,15 @@
 use crate::protocol::{
-    CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentLinkPayload, DocumentUriPayload,
-    InlayHintPayload, LocationPayload, Message, MessageType, Position, QueryPayload, Range,
-    RenamePayload, RenameResultPayload, SemanticTokenPayload, Severity, SignatureHelpPayload,
-    SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload, code_actions_message_from_request,
-    completion_message_from_request, diagnostics_message_from_request,
-    document_links_message_from_request, inlay_hints_message_from_request,
-    location_message_from_request, markup_message_from_request, parse_message,
-    rename_message_from_request, semantic_tokens_message_from_request,
-    signature_help_message_from_request, symbols_message_from_request, to_ndjson,
-    workspace_symbols_message_from_request,
+    CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentFormattingPayload,
+    DocumentLinkPayload, DocumentUriPayload, FormattingOptionsPayload, InlayHintPayload,
+    LocationPayload, Message, MessageType, OnTypeFormattingPayload, Position, QueryPayload, Range,
+    RangeFormattingPayload, RenamePayload, RenameResultPayload, SemanticTokenPayload, Severity,
+    SignatureHelpPayload, SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
+    code_actions_message_from_request, completion_message_from_request,
+    diagnostics_message_from_request, document_links_message_from_request,
+    inlay_hints_message_from_request, location_message_from_request, markup_message_from_request,
+    parse_message, rename_message_from_request, semantic_tokens_message_from_request,
+    signature_help_message_from_request, symbols_message_from_request,
+    text_edits_message_from_request, to_ndjson, workspace_symbols_message_from_request,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -485,6 +486,24 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 inlay_hints_message_from_request(&request, Vec::<InlayHintPayload>::new())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
+            MessageType::DocumentFormatting => text_edits_message_from_request(
+                &request,
+                MessageType::DocumentFormatting,
+                Vec::<TextEditPayload>::new(),
+            )
+            .map_err(|err| ProcessError::Protocol(err.to_string()))?,
+            MessageType::RangeFormatting => text_edits_message_from_request(
+                &request,
+                MessageType::RangeFormatting,
+                Vec::<TextEditPayload>::new(),
+            )
+            .map_err(|err| ProcessError::Protocol(err.to_string()))?,
+            MessageType::OnTypeFormatting => text_edits_message_from_request(
+                &request,
+                MessageType::OnTypeFormatting,
+                Vec::<TextEditPayload>::new(),
+            )
+            .map_err(|err| ProcessError::Protocol(err.to_string()))?,
             MessageType::Diagnostics => {
                 continue;
             }
@@ -862,6 +881,41 @@ impl RealAdapterState {
         inlay_hints_from_text(&text)
     }
 
+    async fn document_formatting_edits(
+        &self,
+        uri: &str,
+        options: FormattingOptionsPayload,
+    ) -> Vec<TextEditPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+        document_formatting_edits(uri, &text, &options)
+    }
+
+    async fn range_formatting_edits(
+        &self,
+        uri: &str,
+        range: Range,
+        options: FormattingOptionsPayload,
+    ) -> Vec<TextEditPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+        range_formatting_edits(uri, &text, range, &options)
+    }
+
+    async fn on_type_formatting_edits(
+        &self,
+        uri: &str,
+        offset: Position,
+        options: FormattingOptionsPayload,
+    ) -> Vec<TextEditPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+        on_type_formatting_edits(uri, &text, offset, &options)
+    }
+
     async fn rename_result(
         &self,
         uri: &str,
@@ -1217,6 +1271,36 @@ pub async fn run_real_adapter(
                         .map_err(|err| ProcessError::Protocol(err.to_string()))?;
                 let hints = state.inlay_hints(&payload.uri).await;
                 inlay_hints_message_from_request(&request, hints)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::DocumentFormatting => {
+                let payload: DocumentFormattingPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let edits = state
+                    .document_formatting_edits(&payload.uri, payload.options)
+                    .await;
+                text_edits_message_from_request(&request, MessageType::DocumentFormatting, edits)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::RangeFormatting => {
+                let payload: RangeFormattingPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let edits = state
+                    .range_formatting_edits(&payload.uri, payload.range, payload.options)
+                    .await;
+                text_edits_message_from_request(&request, MessageType::RangeFormatting, edits)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::OnTypeFormatting => {
+                let payload: OnTypeFormattingPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let edits = state
+                    .on_type_formatting_edits(&payload.uri, payload.offset, payload.options)
+                    .await;
+                text_edits_message_from_request(&request, MessageType::OnTypeFormatting, edits)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::Diagnostics => {
@@ -2016,6 +2100,203 @@ fn push_inlay_hint(
     });
 }
 
+fn document_lines(text: &str) -> Vec<&str> {
+    let mut lines = text.split('\n').collect::<Vec<_>>();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        lines.push("");
+    }
+    lines
+}
+
+fn format_isabelle_text(text: &str, options: &FormattingOptionsPayload) -> String {
+    let indent_width = usize::try_from(options.tab_size.max(1)).unwrap_or(1);
+    let indent_unit = if options.insert_spaces {
+        " ".repeat(indent_width)
+    } else {
+        "\t".to_string()
+    };
+    let trim_trailing_whitespace = options.trim_trailing_whitespace.unwrap_or(false);
+
+    let mut indent_level = 0usize;
+    let mut formatted_lines = Vec::new();
+    for line in document_lines(text) {
+        let without_trailing = if trim_trailing_whitespace {
+            line.trim_end()
+        } else {
+            line
+        };
+        let trimmed = without_trailing.trim_start();
+        let tokens = line_identifier_spans(trimmed)
+            .into_iter()
+            .map(|(token, _, _)| token)
+            .collect::<Vec<_>>();
+
+        if tokens
+            .first()
+            .is_some_and(|token| matches!(token.as_str(), "end" | "qed" | "oops"))
+        {
+            indent_level = indent_level.saturating_sub(1);
+        }
+
+        if trimmed.is_empty() {
+            formatted_lines.push(String::new());
+        } else {
+            let mut normalized = String::new();
+            for _ in 0..indent_level {
+                normalized.push_str(&indent_unit);
+            }
+            normalized.push_str(trimmed);
+            formatted_lines.push(normalized);
+        }
+
+        if tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "begin" | "proof"))
+        {
+            indent_level = indent_level.saturating_add(1);
+        }
+    }
+
+    let mut formatted = formatted_lines.join("\n");
+    if options.trim_final_newlines.unwrap_or(false) {
+        while formatted.ends_with('\n') {
+            formatted.pop();
+        }
+    }
+
+    let insert_final_newline = options.insert_final_newline.unwrap_or(text.ends_with('\n'));
+    if insert_final_newline && !formatted.ends_with('\n') {
+        formatted.push('\n');
+    }
+
+    formatted
+}
+
+fn document_formatting_edits(
+    uri: &str,
+    text: &str,
+    options: &FormattingOptionsPayload,
+) -> Vec<TextEditPayload> {
+    let formatted = format_isabelle_text(text, options);
+    if formatted == text {
+        return Vec::new();
+    }
+
+    vec![TextEditPayload {
+        uri: uri.to_string(),
+        range: full_document_range_for_text(text),
+        new_text: formatted,
+    }]
+}
+
+fn range_formatting_edits(
+    uri: &str,
+    text: &str,
+    range: Range,
+    options: &FormattingOptionsPayload,
+) -> Vec<TextEditPayload> {
+    let formatted = format_isabelle_text(text, options);
+    if formatted == text {
+        return Vec::new();
+    }
+
+    let original_lines = document_lines(text);
+    let formatted_lines = document_lines(&formatted);
+    let start = usize::try_from(range.start.line.saturating_sub(1)).unwrap_or(usize::MAX);
+    if start >= original_lines.len() || start >= formatted_lines.len() {
+        return Vec::new();
+    }
+
+    let max_end = original_lines
+        .len()
+        .min(formatted_lines.len())
+        .saturating_sub(1);
+    let mut end = usize::try_from(range.end.line.saturating_sub(1)).unwrap_or(max_end);
+    if end > max_end {
+        end = max_end;
+    }
+    if end < start {
+        return Vec::new();
+    }
+
+    let original_chunk = original_lines[start..=end].join("\n");
+    let formatted_chunk = formatted_lines[start..=end].join("\n");
+    if original_chunk == formatted_chunk {
+        return Vec::new();
+    }
+
+    let start_line = i64::try_from(start.saturating_add(1)).unwrap_or(1);
+    let end_line = i64::try_from(end.saturating_add(1)).unwrap_or(i64::MAX);
+    let end_col =
+        i64::try_from(original_lines[end].chars().count().saturating_add(1)).unwrap_or(i64::MAX);
+    vec![TextEditPayload {
+        uri: uri.to_string(),
+        range: Range {
+            start: Position {
+                line: start_line,
+                col: 1,
+            },
+            end: Position {
+                line: end_line,
+                col: end_col,
+            },
+        },
+        new_text: formatted_chunk,
+    }]
+}
+
+fn on_type_formatting_edits(
+    uri: &str,
+    text: &str,
+    offset: Position,
+    options: &FormattingOptionsPayload,
+) -> Vec<TextEditPayload> {
+    let formatted = format_isabelle_text(text, options);
+    if formatted == text {
+        return Vec::new();
+    }
+
+    let original_lines = document_lines(text);
+    let formatted_lines = document_lines(&formatted);
+    let line_index = usize::try_from(offset.line.saturating_sub(1)).unwrap_or(usize::MAX);
+    if line_index >= original_lines.len() || line_index >= formatted_lines.len() {
+        return Vec::new();
+    }
+    if original_lines[line_index] == formatted_lines[line_index] {
+        return Vec::new();
+    }
+
+    let line = i64::try_from(line_index.saturating_add(1)).unwrap_or(i64::MAX);
+    let end_col = i64::try_from(original_lines[line_index].chars().count().saturating_add(1))
+        .unwrap_or(i64::MAX);
+    vec![TextEditPayload {
+        uri: uri.to_string(),
+        range: Range {
+            start: Position { line, col: 1 },
+            end: Position { line, col: end_col },
+        },
+        new_text: formatted_lines[line_index].to_string(),
+    }]
+}
+
+fn full_document_range_for_text(text: &str) -> Range {
+    let lines = document_lines(text);
+    let last_line = i64::try_from(lines.len()).unwrap_or(1).max(1);
+    let last_col = i64::try_from(lines.last().map(|line| line.chars().count()).unwrap_or(0))
+        .unwrap_or(0)
+        .saturating_add(1);
+    Range {
+        start: Position { line: 1, col: 1 },
+        end: Position {
+            line: last_line,
+            col: last_col,
+        },
+    }
+}
+
 const COMPLETION_KEYWORDS: &[&str] = &[
     "theory",
     "imports",
@@ -2683,6 +2964,72 @@ Unfinished session(s): Draft
                 .iter()
                 .any(|hint| hint.label == "facts: " && hint.kind.as_deref() == Some("parameter"))
         );
+    }
+
+    fn formatting_options() -> FormattingOptionsPayload {
+        FormattingOptionsPayload {
+            tab_size: 2,
+            insert_spaces: true,
+            trim_trailing_whitespace: Some(true),
+            insert_final_newline: Some(true),
+            trim_final_newlines: Some(true),
+        }
+    }
+
+    #[test]
+    fn format_isabelle_text_indents_theory_and_proof_blocks() {
+        let text =
+            "theory Demo imports Main begin\nlemma t: True\nproof\nshow True by simp\nqed\nend\n";
+        let formatted = format_isabelle_text(text, &formatting_options());
+        let expected = "theory Demo imports Main begin\n  lemma t: True\n  proof\n    show True by simp\n  qed\nend\n";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn document_formatting_edits_rewrite_entire_document() {
+        let uri = "file:///tmp/Example.thy";
+        let text =
+            "theory Demo imports Main begin\nlemma t: True\nproof\nshow True by simp\nqed\nend\n";
+        let edits = document_formatting_edits(uri, text, &formatting_options());
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].uri, uri);
+        assert!(edits[0].new_text.contains("\n  lemma t: True\n"));
+    }
+
+    #[test]
+    fn range_formatting_edits_limit_to_requested_lines() {
+        let uri = "file:///tmp/Example.thy";
+        let text =
+            "theory Demo imports Main begin\nlemma t: True\nproof\nshow True by simp\nqed\nend\n";
+        let edits = range_formatting_edits(
+            uri,
+            text,
+            Range {
+                start: Position { line: 2, col: 1 },
+                end: Position { line: 2, col: 13 },
+            },
+            &formatting_options(),
+        );
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.start.line, 2);
+        assert_eq!(edits[0].range.end.line, 2);
+        assert_eq!(edits[0].new_text, "  lemma t: True");
+    }
+
+    #[test]
+    fn on_type_formatting_edits_update_current_line_only() {
+        let uri = "file:///tmp/Example.thy";
+        let text = "theory Demo imports Main begin\nlemma t: True\nend\n";
+        let edits = on_type_formatting_edits(
+            uri,
+            text,
+            Position { line: 2, col: 5 },
+            &formatting_options(),
+        );
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].range.start.line, 2);
+        assert_eq!(edits[0].range.end.line, 2);
+        assert_eq!(edits[0].new_text, "  lemma t: True");
     }
 
     #[tokio::test]

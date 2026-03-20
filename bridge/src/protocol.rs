@@ -32,6 +32,12 @@ pub enum MessageType {
     DocumentLinks,
     #[serde(rename = "inlay_hints")]
     InlayHints,
+    #[serde(rename = "document_formatting")]
+    DocumentFormatting,
+    #[serde(rename = "range_formatting")]
+    RangeFormatting,
+    #[serde(rename = "on_type_formatting")]
+    OnTypeFormatting,
     #[serde(rename = "diagnostics")]
     Diagnostics,
     #[serde(rename = "markup")]
@@ -90,6 +96,44 @@ pub struct RenamePayload {
 #[serde(deny_unknown_fields)]
 pub struct DocumentUriPayload {
     pub uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct FormattingOptionsPayload {
+    pub tab_size: u32,
+    pub insert_spaces: bool,
+    #[serde(default)]
+    pub trim_trailing_whitespace: Option<bool>,
+    #[serde(default)]
+    pub insert_final_newline: Option<bool>,
+    #[serde(default)]
+    pub trim_final_newlines: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentFormattingPayload {
+    pub uri: String,
+    pub options: FormattingOptionsPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RangeFormattingPayload {
+    pub uri: String,
+    pub range: Range,
+    pub options: FormattingOptionsPayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct OnTypeFormattingPayload {
+    pub uri: String,
+    pub offset: Position,
+    pub ch: String,
+    pub options: FormattingOptionsPayload,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -268,6 +312,18 @@ impl Message {
     }
 
     pub fn document_uri_payload(&self) -> Result<DocumentUriPayload, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn document_formatting_payload(&self) -> Result<DocumentFormattingPayload, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn range_formatting_payload(&self) -> Result<RangeFormattingPayload, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn on_type_formatting_payload(&self) -> Result<OnTypeFormattingPayload, ProtocolError> {
         self.payload_as()
     }
 

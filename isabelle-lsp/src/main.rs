@@ -7,9 +7,13 @@ mod transport;
 use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
     CodeActionPayload as BridgeCodeActionPayload, CompletionItemPayload, DocumentCheckPayload,
+    DocumentFormattingPayload as BridgeDocumentFormattingPayload,
     DocumentLinkPayload as BridgeDocumentLinkPayload, DocumentUriPayload,
+    FormattingOptionsPayload as BridgeFormattingOptionsPayload,
     InlayHintPayload as BridgeInlayHintPayload, LocationPayload, MarkupPayload, Message,
-    MessageType, Position as BridgePosition, QueryPayload, RenamePayload, RenameResultPayload,
+    MessageType, OnTypeFormattingPayload as BridgeOnTypeFormattingPayload,
+    Position as BridgePosition, QueryPayload,
+    RangeFormattingPayload as BridgeRangeFormattingPayload, RenamePayload, RenameResultPayload,
     SemanticTokenPayload, SignatureHelpPayload as BridgeSignatureHelpPayload, SymbolPayload,
     TextEditPayload, WorkspaceSymbolQueryPayload,
 };
@@ -788,6 +792,30 @@ impl IsabelleLanguageServer {
         uri: &Url,
         options: FormattingOptions,
     ) -> Vec<TextEdit> {
+        let version = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        if self.is_session_running().await {
+            self.flush_pushes(Some(vec![uri.clone()])).await;
+            let payload = serde_json::to_value(BridgeDocumentFormattingPayload {
+                uri: uri.to_string(),
+                options: bridge_formatting_options_from_lsp(&options),
+            });
+            if let Ok(payload) = payload
+                && let Ok(response) = self
+                    .bridge
+                    .request(MessageType::DocumentFormatting, version, payload)
+                    .await
+                && response.msg_type == MessageType::DocumentFormatting
+                && let Ok(edits) = response.text_edits_payload()
+            {
+                return bridge_text_edits_for_uri_to_lsp(uri, edits);
+            }
+        }
+
         let text = self
             .document_snapshot(uri)
             .await
@@ -802,6 +830,31 @@ impl IsabelleLanguageServer {
         range: LspRange,
         options: FormattingOptions,
     ) -> Vec<TextEdit> {
+        let version = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        if self.is_session_running().await {
+            self.flush_pushes(Some(vec![uri.clone()])).await;
+            let payload = serde_json::to_value(BridgeRangeFormattingPayload {
+                uri: uri.to_string(),
+                range: bridge_range_from_lsp(range),
+                options: bridge_formatting_options_from_lsp(&options),
+            });
+            if let Ok(payload) = payload
+                && let Ok(response) = self
+                    .bridge
+                    .request(MessageType::RangeFormatting, version, payload)
+                    .await
+                && response.msg_type == MessageType::RangeFormatting
+                && let Ok(edits) = response.text_edits_payload()
+            {
+                return bridge_text_edits_for_uri_to_lsp(uri, edits);
+            }
+        }
+
         let text = self
             .document_snapshot(uri)
             .await
@@ -814,8 +867,35 @@ impl IsabelleLanguageServer {
         &self,
         uri: &Url,
         position: Position,
+        ch: String,
         options: FormattingOptions,
     ) -> Vec<TextEdit> {
+        let version = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        if self.is_session_running().await {
+            self.flush_pushes(Some(vec![uri.clone()])).await;
+            let payload = serde_json::to_value(BridgeOnTypeFormattingPayload {
+                uri: uri.to_string(),
+                offset: lsp_position_to_bridge(position),
+                ch,
+                options: bridge_formatting_options_from_lsp(&options),
+            });
+            if let Ok(payload) = payload
+                && let Ok(response) = self
+                    .bridge
+                    .request(MessageType::OnTypeFormatting, version, payload)
+                    .await
+                && response.msg_type == MessageType::OnTypeFormatting
+                && let Ok(edits) = response.text_edits_payload()
+            {
+                return bridge_text_edits_for_uri_to_lsp(uri, edits);
+            }
+        }
+
         let text = self
             .document_snapshot(uri)
             .await
@@ -1321,8 +1401,9 @@ impl LanguageServer for IsabelleLanguageServer {
     ) -> JsonRpcResult<Option<Vec<TextEdit>>> {
         let uri = params.text_document_position.text_document.uri;
         let position = params.text_document_position.position;
+        let ch = params.ch;
         Ok(Some(
-            self.on_type_formatting_edits_for_uri(&uri, position, params.options)
+            self.on_type_formatting_edits_for_uri(&uri, position, ch, params.options)
                 .await,
         ))
     }
@@ -2403,6 +2484,37 @@ fn lsp_position_to_bridge(position: Position) -> BridgePosition {
     }
 }
 
+fn bridge_range_from_lsp(range: LspRange) -> bridge::protocol::Range {
+    bridge::protocol::Range {
+        start: lsp_position_to_bridge(range.start),
+        end: lsp_position_to_bridge(range.end),
+    }
+}
+
+fn bridge_formatting_options_from_lsp(
+    options: &FormattingOptions,
+) -> BridgeFormattingOptionsPayload {
+    BridgeFormattingOptionsPayload {
+        tab_size: options.tab_size,
+        insert_spaces: options.insert_spaces,
+        trim_trailing_whitespace: options.trim_trailing_whitespace,
+        insert_final_newline: options.insert_final_newline,
+        trim_final_newlines: options.trim_final_newlines,
+    }
+}
+
+fn bridge_text_edits_for_uri_to_lsp(uri: &Url, edits: Vec<TextEditPayload>) -> Vec<TextEdit> {
+    let uri_text = uri.as_str();
+    edits
+        .into_iter()
+        .filter(|edit| edit.uri == uri_text)
+        .map(|edit| TextEdit {
+            range: bridge_range_to_lsp(edit.range),
+            new_text: edit.new_text,
+        })
+        .collect()
+}
+
 fn bridge_range_to_lsp(range: bridge::protocol::Range) -> LspRange {
     LspRange {
         start: Position {
@@ -2933,6 +3045,43 @@ mod tests {
         assert_eq!(hint.position.line, 1);
         assert_eq!(hint.position.character, 5);
         assert!(matches!(hint.kind, Some(InlayHintKind::PARAMETER)));
+    }
+
+    #[test]
+    fn bridge_formatting_options_from_lsp_maps_core_fields() {
+        let lsp = formatting_options();
+        let bridge = super::bridge_formatting_options_from_lsp(&lsp);
+        assert_eq!(bridge.tab_size, 2);
+        assert!(bridge.insert_spaces);
+        assert_eq!(bridge.trim_trailing_whitespace, Some(true));
+        assert_eq!(bridge.insert_final_newline, Some(true));
+        assert_eq!(bridge.trim_final_newlines, Some(true));
+    }
+
+    #[test]
+    fn bridge_text_edits_for_uri_to_lsp_filters_other_uris() {
+        let uri = Url::parse("file:///tmp/Example.thy").expect("file url");
+        let edits = vec![
+            TextEditPayload {
+                uri: "file:///tmp/Example.thy".to_string(),
+                range: bridge::protocol::Range {
+                    start: BridgePosition { line: 1, col: 1 },
+                    end: BridgePosition { line: 1, col: 2 },
+                },
+                new_text: "x".to_string(),
+            },
+            TextEditPayload {
+                uri: "file:///tmp/Other.thy".to_string(),
+                range: bridge::protocol::Range {
+                    start: BridgePosition { line: 1, col: 1 },
+                    end: BridgePosition { line: 1, col: 2 },
+                },
+                new_text: "y".to_string(),
+            },
+        ];
+        let mapped = super::bridge_text_edits_for_uri_to_lsp(&uri, edits);
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].new_text, "x");
     }
 
     #[test]

@@ -118,3 +118,33 @@ fn inlay_hints_payload_decodes_array() {
     assert_eq!(payload[0].label, "method: ");
     assert_eq!(payload[0].kind.as_deref(), Some("parameter"));
 }
+
+#[test]
+fn document_formatting_payload_decodes_options() {
+    let raw = r#"{"id":"msg-0006","type":"document_formatting","session":"s1","version":1,"payload":{"uri":"file:///tmp/Example.thy","options":{"tabSize":2,"insertSpaces":true,"trimTrailingWhitespace":true,"insertFinalNewline":true,"trimFinalNewlines":true}}}"#;
+    let message = parse_message(raw).expect("document_formatting payload should parse");
+    assert_eq!(message.msg_type, MessageType::DocumentFormatting);
+
+    let payload = message
+        .document_formatting_payload()
+        .expect("document_formatting payload should decode");
+    assert_eq!(payload.uri, "file:///tmp/Example.thy");
+    assert_eq!(payload.options.tab_size, 2);
+    assert!(payload.options.insert_spaces);
+    assert_eq!(payload.options.trim_trailing_whitespace, Some(true));
+}
+
+#[test]
+fn on_type_formatting_payload_decodes_position_and_character() {
+    let raw = r#"{"id":"msg-0007","type":"on_type_formatting","session":"s1","version":1,"payload":{"uri":"file:///tmp/Example.thy","offset":{"line":2,"col":5},"ch":"\n","options":{"tabSize":2,"insertSpaces":true}}}"#;
+    let message = parse_message(raw).expect("on_type_formatting payload should parse");
+    assert_eq!(message.msg_type, MessageType::OnTypeFormatting);
+
+    let payload = message
+        .on_type_formatting_payload()
+        .expect("on_type_formatting payload should decode");
+    assert_eq!(payload.uri, "file:///tmp/Example.thy");
+    assert_eq!(payload.offset.line, 2);
+    assert_eq!(payload.offset.col, 5);
+    assert_eq!(payload.ch, "\n");
+}
