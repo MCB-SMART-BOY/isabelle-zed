@@ -28,19 +28,21 @@ use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, CompletionItem, CompletionItemKind,
     CompletionOptions, CompletionParams, CompletionResponse, DeclarationCapability,
-    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentSymbolParams,
-    DocumentSymbolResponse, ExecuteCommandOptions, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverProviderCapability, ImplementationProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, Location, MarkedString, MessageType as LspMessageType,
-    OneOf, Position, PrepareRenameResponse, Range as LspRange, ReferenceParams, RenameOptions,
-    RenameParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
-    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TypeDefinitionProviderCapability, Url, WorkspaceEdit, WorkspaceSymbolParams,
+    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
+    DocumentLinkOptions, DocumentLinkParams, DocumentSymbolParams, DocumentSymbolResponse,
+    ExecuteCommandOptions, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
+    ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    Location, MarkedString, MessageType as LspMessageType, OneOf, ParameterInformation,
+    ParameterLabel, Position, PrepareRenameResponse, Range as LspRange, ReferenceParams,
+    RenameOptions, RenameParams, SelectionRange, SelectionRangeParams,
+    SelectionRangeProviderCapability, SemanticToken, SemanticTokenModifier, SemanticTokenType,
+    SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, ServerInfo, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
+    SignatureInformation, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+    TextDocumentItem, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextEdit, TypeDefinitionProviderCapability, Url, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info};
@@ -639,6 +641,28 @@ impl IsabelleLanguageServer {
         Ok(folding_ranges_from_text(&text))
     }
 
+    async fn signature_help_for_position(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Result<Option<SignatureHelp>, String> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        Ok(signature_help_from_text(&text, position))
+    }
+
+    async fn document_links_for_uri(&self, uri: &Url) -> Result<Vec<DocumentLink>, String> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        Ok(document_links_from_text(uri, &text))
+    }
+
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
         if !self.is_session_running().await {
             return Err("isabelle session is stopped".to_string());
@@ -749,6 +773,15 @@ impl LanguageServer for IsabelleLanguageServer {
                     resolve_provider: Some(false),
                     trigger_characters: Some(vec![".".to_string(), "_".to_string()]),
                     ..CompletionOptions::default()
+                }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: Some(vec![",".to_string()]),
+                    work_done_progress_options: Default::default(),
+                }),
+                document_link_provider: Some(DocumentLinkOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
@@ -1021,6 +1054,38 @@ impl LanguageServer for IsabelleLanguageServer {
             Ok(ranges) => Ok(Some(ranges)),
             Err(err) => {
                 self.log_error(format!("failed to compute folding ranges: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> JsonRpcResult<Option<SignatureHelp>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+
+        match self.signature_help_for_position(&uri, position).await {
+            Ok(help) => Ok(help),
+            Err(err) => {
+                self.log_error(format!("failed to compute signature help: {err}"))
+                    .await;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> JsonRpcResult<Option<Vec<DocumentLink>>> {
+        let uri = params.text_document.uri;
+        match self.document_links_for_uri(&uri).await {
+            Ok(links) => Ok(Some(links)),
+            Err(err) => {
+                self.log_error(format!("failed to compute document links: {err}"))
                     .await;
                 Ok(Some(Vec::new()))
             }
@@ -1349,22 +1414,10 @@ fn is_isabelle_identifier_char(ch: char) -> bool {
 }
 
 fn line_identifier_tokens(line: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-
-    for ch in line.chars() {
-        if is_isabelle_identifier_char(ch) {
-            current.push(ch);
-            continue;
-        }
-        if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
+    line_identifier_spans(line)
+        .into_iter()
+        .map(|(token, _, _)| token)
+        .collect()
 }
 
 fn folding_ranges_from_text(text: &str) -> Vec<FoldingRange> {
@@ -1402,6 +1455,361 @@ fn folding_ranges_from_text(text: &str) -> Vec<FoldingRange> {
     });
     ranges.dedup_by(|a, b| a.start_line == b.start_line && a.end_line == b.end_line);
     ranges
+}
+
+fn signature_help_from_text(text: &str, position: Position) -> Option<SignatureHelp> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let line_index = usize::try_from(position.line).ok()?;
+    let line = lines.get(line_index)?;
+
+    signature_help_from_call(line, position.character)
+        .or_else(|| signature_help_from_keyword(line, position.character))
+}
+
+fn signature_help_from_call(line: &str, cursor_char: u32) -> Option<SignatureHelp> {
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+
+    let cursor = usize::try_from(cursor_char)
+        .unwrap_or(usize::MAX)
+        .min(chars.len());
+    let mut open_stack = Vec::<usize>::new();
+    for (index, ch) in chars.iter().take(cursor).enumerate() {
+        match *ch {
+            '(' => open_stack.push(index),
+            ')' => {
+                open_stack.pop();
+            }
+            _ => {}
+        }
+    }
+    let open = *open_stack.last()?;
+
+    let mut name_end = open;
+    while name_end > 0 && chars[name_end - 1].is_whitespace() {
+        name_end -= 1;
+    }
+    let mut name_start = name_end;
+    while name_start > 0 && is_isabelle_identifier_char(chars[name_start - 1]) {
+        name_start -= 1;
+    }
+    if name_start == name_end {
+        return None;
+    }
+    let callee = chars[name_start..name_end].iter().collect::<String>();
+    if callee.is_empty() {
+        return None;
+    }
+
+    let mut nested_depth = 0_i32;
+    let mut active_param = 0_usize;
+    for ch in chars.iter().take(cursor).skip(open + 1) {
+        match *ch {
+            '(' => nested_depth = nested_depth.saturating_add(1),
+            ')' => {
+                if nested_depth > 0 {
+                    nested_depth -= 1;
+                }
+            }
+            ',' if nested_depth == 0 => active_param = active_param.saturating_add(1),
+            _ => {}
+        }
+    }
+
+    Some(signature_help_for_callee(&callee, active_param))
+}
+
+fn signature_help_from_keyword(line: &str, cursor_char: u32) -> Option<SignatureHelp> {
+    let spans = line_identifier_spans(line);
+    if spans.is_empty() {
+        return None;
+    }
+
+    let cursor = cursor_char;
+    let token = spans
+        .iter()
+        .find(|(_, start, end)| cursor >= *start && cursor <= *end)
+        .map(|(token, _, _)| token.as_str())
+        .or_else(|| {
+            spans
+                .iter()
+                .rev()
+                .find(|(_, _, end)| *end <= cursor)
+                .map(|(token, _, _)| token.as_str())
+        })?;
+
+    let prefix = line
+        .chars()
+        .take(usize::try_from(cursor).unwrap_or(0))
+        .collect::<String>();
+
+    match token {
+        "lemma" | "theorem" | "corollary" | "proposition" => {
+            let active = if prefix.contains(':') { 1 } else { 0 };
+            Some(signature_help_from_template(
+                token,
+                vec!["name".to_string(), "statement".to_string()],
+                active,
+                Some(format!("{token} <name>: <statement>")),
+            ))
+        }
+        "definition" | "abbreviation" | "fun" | "function" | "primrec" => {
+            let active = if prefix.contains("where") { 1 } else { 0 };
+            Some(signature_help_from_template(
+                token,
+                vec!["name".to_string(), "equation".to_string()],
+                active,
+                Some(format!("{token} <name> where <equation>")),
+            ))
+        }
+        "have" | "show" | "thus" | "hence" => Some(signature_help_from_template(
+            token,
+            vec!["statement".to_string()],
+            0,
+            Some(format!("{token} <statement>")),
+        )),
+        _ => None,
+    }
+}
+
+fn signature_help_for_callee(callee: &str, active_param: usize) -> SignatureHelp {
+    match callee {
+        "lemma" | "theorem" | "corollary" | "proposition" => signature_help_from_template(
+            callee,
+            vec!["name".to_string(), "statement".to_string()],
+            active_param,
+            Some(format!("{callee} <name>: <statement>")),
+        ),
+        "definition" | "abbreviation" | "fun" | "function" | "primrec" => {
+            signature_help_from_template(
+                callee,
+                vec!["name".to_string(), "equation".to_string()],
+                active_param,
+                Some(format!("{callee} <name> where <equation>")),
+            )
+        }
+        _ => {
+            let count = active_param.saturating_add(1).clamp(1, 6);
+            let params = (1..=count)
+                .map(|index| format!("arg{index}"))
+                .collect::<Vec<_>>();
+            signature_help_from_template(callee, params, active_param, None)
+        }
+    }
+}
+
+fn signature_help_from_template(
+    callee: &str,
+    params: Vec<String>,
+    active_param: usize,
+    documentation: Option<String>,
+) -> SignatureHelp {
+    let joined = params.join(", ");
+    let label = if joined.is_empty() {
+        callee.to_string()
+    } else {
+        format!("{callee}({joined})")
+    };
+
+    let bounded_active = if params.is_empty() {
+        0
+    } else {
+        active_param.min(params.len().saturating_sub(1))
+    };
+    let parameters = params
+        .into_iter()
+        .map(|param| ParameterInformation {
+            label: ParameterLabel::Simple(param),
+            documentation: None,
+        })
+        .collect::<Vec<_>>();
+
+    SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label,
+            documentation: documentation.map(tower_lsp::lsp_types::Documentation::String),
+            parameters: Some(parameters),
+            active_parameter: Some(u32::try_from(bounded_active).unwrap_or(0)),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(u32::try_from(bounded_active).unwrap_or(0)),
+    }
+}
+
+fn document_links_from_text(uri: &Url, text: &str) -> Vec<DocumentLink> {
+    let base_dir = uri
+        .to_file_path()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+    let mut links = Vec::new();
+
+    for (line_index, line) in text.lines().enumerate() {
+        let line_number = u32::try_from(line_index).unwrap_or(u32::MAX);
+
+        for (start, end, target) in http_links_in_line(line) {
+            let Ok(target_url) = Url::parse(&target) else {
+                continue;
+            };
+            links.push(DocumentLink {
+                range: LspRange {
+                    start: Position {
+                        line: line_number,
+                        character: start,
+                    },
+                    end: Position {
+                        line: line_number,
+                        character: end,
+                    },
+                },
+                target: Some(target_url),
+                tooltip: Some("Open external link".to_string()),
+                data: None,
+            });
+        }
+
+        if let Some(base) = &base_dir {
+            for (name, start, end) in import_tokens_in_line(line) {
+                if let Some(target_url) = resolve_import_target(base, &name) {
+                    links.push(DocumentLink {
+                        range: LspRange {
+                            start: Position {
+                                line: line_number,
+                                character: start,
+                            },
+                            end: Position {
+                                line: line_number,
+                                character: end,
+                            },
+                        },
+                        target: Some(target_url),
+                        tooltip: Some(format!("Open imported theory `{name}`")),
+                        data: None,
+                    });
+                }
+            }
+        }
+    }
+
+    links.sort_by(|a, b| {
+        let a_target = a
+            .target
+            .as_ref()
+            .map(Url::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let b_target = b
+            .target
+            .as_ref()
+            .map(Url::as_str)
+            .unwrap_or_default()
+            .to_string();
+        a.range
+            .start
+            .line
+            .cmp(&b.range.start.line)
+            .then_with(|| a.range.start.character.cmp(&b.range.start.character))
+            .then_with(|| a.range.end.line.cmp(&b.range.end.line))
+            .then_with(|| a.range.end.character.cmp(&b.range.end.character))
+            .then_with(|| a_target.cmp(&b_target))
+    });
+    links.dedup_by(|a, b| {
+        a.range == b.range
+            && a.target.as_ref().map(Url::as_str) == b.target.as_ref().map(Url::as_str)
+    });
+    links
+}
+
+fn http_links_in_line(line: &str) -> Vec<(u32, u32, String)> {
+    let mut links = Vec::new();
+    let bytes = line.as_bytes();
+    let mut start_byte = 0usize;
+
+    while start_byte < bytes.len() {
+        let candidate = &line[start_byte..];
+        let relative = if let Some(index) = candidate.find("https://") {
+            Some(index)
+        } else {
+            candidate.find("http://")
+        };
+        let Some(relative_index) = relative else {
+            break;
+        };
+        let absolute_start = start_byte.saturating_add(relative_index);
+        let remainder = &line[absolute_start..];
+        let end_offset = remainder
+            .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | ')' | ']' | '>'))
+            .unwrap_or(remainder.len());
+        let absolute_end = absolute_start.saturating_add(end_offset);
+
+        let target = line[absolute_start..absolute_end].to_string();
+        let start = u32::try_from(line[..absolute_start].chars().count()).unwrap_or(0);
+        let end = u32::try_from(line[..absolute_end].chars().count()).unwrap_or(start);
+        if end > start {
+            links.push((start, end, target));
+        }
+        start_byte = absolute_end.saturating_add(1);
+    }
+
+    links
+}
+
+fn import_tokens_in_line(line: &str) -> Vec<(String, u32, u32)> {
+    let spans = line_identifier_spans(line);
+    let Some(imports_index) = spans.iter().position(|(token, _, _)| token == "imports") else {
+        return Vec::new();
+    };
+
+    spans
+        .into_iter()
+        .skip(imports_index + 1)
+        .take_while(|(token, _, _)| token != "begin")
+        .collect()
+}
+
+fn resolve_import_target(base_dir: &std::path::Path, theory_name: &str) -> Option<Url> {
+    let direct = base_dir.join(format!("{theory_name}.thy"));
+    if direct.is_file() {
+        return Url::from_file_path(direct).ok();
+    }
+
+    let nested = base_dir.join(format!("{}.thy", theory_name.replace('.', "/")));
+    if nested.is_file() {
+        return Url::from_file_path(nested).ok();
+    }
+    None
+}
+
+fn line_identifier_spans(line: &str) -> Vec<(String, u32, u32)> {
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if !is_isabelle_identifier_char(chars[index]) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index + 1 < chars.len() && is_isabelle_identifier_char(chars[index + 1]) {
+            index += 1;
+        }
+        let end = index.saturating_add(1);
+        let token = chars[start..end].iter().collect::<String>();
+        spans.push((
+            token,
+            u32::try_from(start).unwrap_or(0),
+            u32::try_from(end).unwrap_or(u32::MAX),
+        ));
+        index = end;
+    }
+
+    spans
 }
 
 fn command_target_uri(argument: Option<&Value>) -> Option<String> {
@@ -1807,6 +2215,54 @@ mod tests {
             ranges
                 .iter()
                 .any(|range| range.start_line == 2 && range.end_line == 4)
+        );
+    }
+
+    #[test]
+    fn signature_help_from_text_tracks_active_parameter() {
+        let text = "theory Demo imports Main begin\nfoo(arg1, arg2)\nend\n";
+        let help = super::signature_help_from_text(
+            text,
+            Position {
+                line: 1,
+                character: 10,
+            },
+        )
+        .expect("signature help should be available");
+        assert_eq!(help.active_parameter, Some(1));
+        assert_eq!(help.signatures.len(), 1);
+        assert!(help.signatures[0].label.starts_with("foo("));
+    }
+
+    #[test]
+    fn document_links_from_text_extracts_http_target() {
+        let uri = Url::parse("file:///tmp/Example.thy").expect("file url");
+        let links =
+            super::document_links_from_text(&uri, "text \"https://isabelle.in.tum.de/index.html\"");
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].target.as_ref().map(Url::as_str),
+            Some("https://isabelle.in.tum.de/index.html")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_links_from_text_resolves_imported_theory_file() {
+        let temp = tempdir().expect("tempdir");
+        let imported = temp.path().join("Demo.thy");
+        std::fs::write(&imported, "theory Demo imports Main begin\nend\n")
+            .expect("write imported theory");
+
+        let current = temp.path().join("Main.thy");
+        let uri = Url::from_file_path(&current).expect("main uri");
+        let expected = Url::from_file_path(&imported).expect("import uri");
+
+        let links = super::document_links_from_text(&uri, "theory Main imports Demo begin\nend\n");
+        assert!(
+            links
+                .iter()
+                .any(|link| link.target.as_ref().map(Url::as_str) == Some(expected.as_str()))
         );
     }
 
