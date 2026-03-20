@@ -31,6 +31,12 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Run NDJSON E2E
+        run: cargo run -p isabelle-zed-xtask -- spawn-e2e-ndjson
+
+      - name: Run LSP TCP E2E
+        run: cargo run -p isabelle-zed-xtask -- mock-lsp-e2e-tcp
+
       - name: Check extension wasm target
         run: cargo check -p isabelle-zed-extension --target wasm32-wasip2
 
