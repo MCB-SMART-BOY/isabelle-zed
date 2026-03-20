@@ -653,12 +653,17 @@ impl RealAdapterState {
             return Vec::new();
         };
 
-        declaration_symbols(&text)
+        self.indexed_documents(uri)
+            .await
             .into_iter()
-            .filter(|symbol| symbol.name == identifier)
-            .map(|symbol| LocationPayload {
-                uri: uri.to_string(),
-                range: symbol.range,
+            .flat_map(|(doc_uri, doc_text)| {
+                declaration_symbols(&doc_text)
+                    .into_iter()
+                    .filter(|symbol| symbol.name == identifier)
+                    .map(move |symbol| LocationPayload {
+                        uri: doc_uri.clone(),
+                        range: symbol.range,
+                    })
             })
             .collect()
     }
@@ -676,11 +681,16 @@ impl RealAdapterState {
             return Vec::new();
         };
 
-        identifier_ranges(&text, &identifier)
+        self.indexed_documents(uri)
+            .await
             .into_iter()
-            .map(|range| LocationPayload {
-                uri: uri.to_string(),
-                range,
+            .flat_map(|(doc_uri, doc_text)| {
+                identifier_ranges(&doc_text, &identifier)
+                    .into_iter()
+                    .map(move |range| LocationPayload {
+                        uri: doc_uri.clone(),
+                        range,
+                    })
             })
             .collect()
     }
@@ -696,7 +706,7 @@ impl RealAdapterState {
             normalize_one_based(offset.col),
         )
         .unwrap_or_default();
-        completion_items_from_text(&text, &prefix)
+        completion_items_from_documents(&self.indexed_documents(uri).await, &prefix)
     }
 
     async fn document_symbols(&self, uri: &str) -> Vec<SymbolPayload> {
@@ -772,12 +782,18 @@ impl RealAdapterState {
             return Vec::new();
         };
 
-        identifier_ranges(&text, &identifier)
+        self.indexed_documents(uri)
+            .await
             .into_iter()
-            .map(|range| TextEditPayload {
-                uri: uri.to_string(),
-                range,
-                new_text: new_name.clone(),
+            .flat_map(|(doc_uri, doc_text)| {
+                let replacement = new_name.clone();
+                identifier_ranges(&doc_text, &identifier)
+                    .into_iter()
+                    .map(move |range| TextEditPayload {
+                        uri: doc_uri.clone(),
+                        range,
+                        new_text: replacement.clone(),
+                    })
             })
             .collect()
     }
@@ -815,6 +831,41 @@ impl RealAdapterState {
             }
         }
 
+        let diagnostics = self
+            .latest_documents
+            .get(uri)
+            .map(|cached| cached.diagnostics.clone())
+            .unwrap_or_default();
+        if diagnostics_indicate_unfinished_theory(&diagnostics) && !contains_end_keyword(&text) {
+            let end_pos = document_end_position(&text);
+            actions.push(CodeActionPayload {
+                title: "Append missing end".to_string(),
+                kind: "quickfix".to_string(),
+                edits: vec![TextEditPayload {
+                    uri: uri.to_string(),
+                    range: Range {
+                        start: end_pos.clone(),
+                        end: end_pos,
+                    },
+                    new_text: "\nend\n".to_string(),
+                }],
+            });
+        }
+        if !has_theory_header(&text) {
+            actions.push(CodeActionPayload {
+                title: "Insert minimal theory header".to_string(),
+                kind: "quickfix".to_string(),
+                edits: vec![TextEditPayload {
+                    uri: uri.to_string(),
+                    range: Range {
+                        start: Position { line: 1, col: 1 },
+                        end: Position { line: 1, col: 1 },
+                    },
+                    new_text: "theory Scratch imports Main begin\n\n".to_string(),
+                }],
+            });
+        }
+
         actions
     }
 
@@ -824,6 +875,22 @@ impl RealAdapterState {
         }
 
         read_document_from_uri(uri).await
+    }
+
+    async fn indexed_documents(&self, focus_uri: &str) -> Vec<(String, String)> {
+        let mut docs = self
+            .latest_documents
+            .iter()
+            .map(|(uri, cached)| (uri.clone(), cached.text.clone()))
+            .collect::<Vec<_>>();
+        if docs.iter().any(|(uri, _)| uri == focus_uri) {
+            return docs;
+        }
+
+        if let Some(text) = read_document_from_uri(focus_uri).await {
+            docs.push((focus_uri.to_string(), text));
+        }
+        docs
     }
 
     fn session_dirs_for_uri(&self, uri: &str) -> Vec<PathBuf> {
@@ -1353,7 +1420,15 @@ fn keyword_completion_items(prefix: &str) -> Vec<CompletionItemPayload> {
         .collect()
 }
 
+#[cfg(test)]
 fn completion_items_from_text(text: &str, prefix: &str) -> Vec<CompletionItemPayload> {
+    completion_items_from_documents(&[(String::new(), text.to_string())], prefix)
+}
+
+fn completion_items_from_documents(
+    docs: &[(String, String)],
+    prefix: &str,
+) -> Vec<CompletionItemPayload> {
     let mut labels = std::collections::BTreeSet::new();
 
     for keyword in COMPLETION_KEYWORDS {
@@ -1362,10 +1437,12 @@ fn completion_items_from_text(text: &str, prefix: &str) -> Vec<CompletionItemPay
         }
     }
 
-    for line in text.lines() {
-        for (token, _, _) in identifier_tokens_in_line(line) {
-            if prefix.is_empty() || token.starts_with(prefix) {
-                labels.insert(token);
+    for (_, text) in docs {
+        for line in text.lines() {
+            for (token, _, _) in identifier_tokens_in_line(line) {
+                if prefix.is_empty() || token.starts_with(prefix) {
+                    labels.insert(token);
+                }
             }
         }
     }
@@ -1378,6 +1455,46 @@ fn completion_items_from_text(text: &str, prefix: &str) -> Vec<CompletionItemPay
             detail: None,
         })
         .collect()
+}
+
+fn has_theory_header(text: &str) -> bool {
+    text.lines().any(|line| {
+        identifier_tokens_in_line(line)
+            .first()
+            .map(|(token, _, _)| token == "theory")
+            .unwrap_or(false)
+    })
+}
+
+fn contains_end_keyword(text: &str) -> bool {
+    text.lines().any(|line| {
+        identifier_tokens_in_line(line)
+            .iter()
+            .any(|(token, _, _)| token == "end")
+    })
+}
+
+fn diagnostics_indicate_unfinished_theory(diagnostics: &[Diagnostic]) -> bool {
+    diagnostics.iter().any(|diagnostic| {
+        let message = diagnostic.message.to_ascii_lowercase();
+        message.contains("end-of-input")
+            || message.contains("unfinished")
+            || message.contains("unexpected end")
+    })
+}
+
+fn document_end_position(text: &str) -> Position {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Position { line: 1, col: 1 };
+    }
+
+    let last_line = lines.len();
+    let last_col = lines[last_line - 1].chars().count().saturating_add(1);
+    Position {
+        line: i64::try_from(last_line).unwrap_or(i64::MAX),
+        col: i64::try_from(last_col).unwrap_or(i64::MAX),
+    }
 }
 
 fn identifier_tokens_in_line(line_text: &str) -> Vec<(String, usize, usize)> {
@@ -1584,7 +1701,7 @@ Unfinished session(s): Draft
     #[tokio::test]
     async fn code_actions_provides_quickfix_for_sorry() {
         let uri = "file:///tmp/Example.thy";
-        let text = "lemma foo: True\n  sorry\n";
+        let text = "theory Example imports Main begin\nlemma foo: True\n  sorry\nend\n";
         let mut state =
             RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
         state.latest_documents.insert(
@@ -1627,6 +1744,97 @@ Unfinished session(s): Draft
             tokens
                 .iter()
                 .any(|token| token.token_type == "function" && token.line == 2)
+        );
+    }
+
+    #[tokio::test]
+    async fn definition_locations_searches_across_cached_documents() {
+        let uri_a = "file:///tmp/A.thy";
+        let uri_b = "file:///tmp/B.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri_a.to_string(),
+            CachedDocument {
+                text: "theory A imports Main begin\nlemma foo: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_b.to_string(),
+            CachedDocument {
+                text: "theory B imports Main begin\nlemma uses_foo: foo by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let locations = state
+            .definition_locations(uri_b, Position { line: 2, col: 17 })
+            .await;
+        assert!(!locations.is_empty());
+        assert!(locations.iter().any(|location| location.uri == uri_a));
+    }
+
+    #[tokio::test]
+    async fn rename_edits_include_all_cached_documents() {
+        let uri_a = "file:///tmp/A.thy";
+        let uri_b = "file:///tmp/B.thy";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri_a.to_string(),
+            CachedDocument {
+                text: "theory A imports Main begin\nlemma foo: True by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+        state.latest_documents.insert(
+            uri_b.to_string(),
+            CachedDocument {
+                text: "theory B imports Main begin\nlemma uses_foo: foo by simp\nend\n".to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let edits = state
+            .rename_edits(uri_b, Position { line: 2, col: 17 }, "bar".to_string())
+            .await;
+        assert!(edits.iter().any(|edit| edit.uri == uri_a));
+        assert!(edits.iter().any(|edit| edit.uri == uri_b));
+    }
+
+    #[tokio::test]
+    async fn code_actions_add_append_end_quickfix_for_unfinished_theory() {
+        let uri = "file:///tmp/Example.thy";
+        let text = "theory Example imports Main begin\nlemma foo: True by simp\n";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: text.to_string(),
+                version: 1,
+                diagnostics: vec![Diagnostic {
+                    uri: uri.to_string(),
+                    range: Range {
+                        start: Position { line: 2, col: 1 },
+                        end: Position { line: 2, col: 2 },
+                    },
+                    severity: Severity::Error,
+                    message: "but end-of-input was found".to_string(),
+                }],
+            },
+        );
+
+        let actions = state.code_actions(uri).await;
+        assert!(
+            actions
+                .iter()
+                .any(|action| action.title == "Append missing end")
         );
     }
 
