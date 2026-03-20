@@ -1,6 +1,8 @@
 use crate::protocol::{
-    Diagnostic, Message, MessageType, Position, Range, Severity, diagnostics_message_from_request,
-    markup_message_from_request, parse_message, to_ndjson,
+    CompletionItemPayload, Diagnostic, DocumentUriPayload, LocationPayload, Message, MessageType,
+    Position, QueryPayload, Range, Severity, SymbolPayload, completion_message_from_request,
+    diagnostics_message_from_request, location_message_from_request, markup_message_from_request,
+    parse_message, symbols_message_from_request, to_ndjson,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -433,6 +435,26 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 markup_message_from_request(&request, &payload.uri, payload.offset, &info)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
+            MessageType::Definition => location_message_from_request(
+                &request,
+                MessageType::Definition,
+                Vec::<LocationPayload>::new(),
+            )
+            .map_err(|err| ProcessError::Protocol(err.to_string()))?,
+            MessageType::References => location_message_from_request(
+                &request,
+                MessageType::References,
+                Vec::<LocationPayload>::new(),
+            )
+            .map_err(|err| ProcessError::Protocol(err.to_string()))?,
+            MessageType::Completion => {
+                completion_message_from_request(&request, Vec::<CompletionItemPayload>::new())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::DocumentSymbols => {
+                symbols_message_from_request(&request, Vec::<SymbolPayload>::new())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
             MessageType::Diagnostics => {
                 continue;
             }
@@ -592,11 +614,7 @@ impl RealAdapterState {
     }
 
     async fn hover_markup(&self, uri: &str, offset: Position) -> String {
-        let text = if let Some(cached) = self.latest_documents.get(uri) {
-            Some(cached.text.clone())
-        } else {
-            read_document_from_uri(uri).await
-        };
+        let text = self.resolve_text(uri).await;
 
         let line = normalize_one_based(offset.line);
         let col = normalize_one_based(offset.col);
@@ -605,6 +623,89 @@ impl RealAdapterState {
             Some(text) => build_hover_info(&text, line, col),
             None => format!("No theory text available for hover at {line}:{col}"),
         }
+    }
+
+    async fn definition_locations(&self, uri: &str, offset: Position) -> Vec<LocationPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+
+        let Some((identifier, _, _)) = identifier_at_position(
+            &text,
+            normalize_one_based(offset.line),
+            normalize_one_based(offset.col),
+        ) else {
+            return Vec::new();
+        };
+
+        declaration_symbols(&text)
+            .into_iter()
+            .filter(|symbol| symbol.name == identifier)
+            .map(|symbol| LocationPayload {
+                uri: uri.to_string(),
+                range: symbol.range,
+            })
+            .collect()
+    }
+
+    async fn reference_locations(&self, uri: &str, offset: Position) -> Vec<LocationPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+
+        let Some((identifier, _, _)) = identifier_at_position(
+            &text,
+            normalize_one_based(offset.line),
+            normalize_one_based(offset.col),
+        ) else {
+            return Vec::new();
+        };
+
+        identifier_ranges(&text, &identifier)
+            .into_iter()
+            .map(|range| LocationPayload {
+                uri: uri.to_string(),
+                range,
+            })
+            .collect()
+    }
+
+    async fn completion_items(&self, uri: &str, offset: Position) -> Vec<CompletionItemPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return keyword_completion_items("");
+        };
+
+        let prefix = identifier_prefix_at_position(
+            &text,
+            normalize_one_based(offset.line),
+            normalize_one_based(offset.col),
+        )
+        .unwrap_or_default();
+        completion_items_from_text(&text, &prefix)
+    }
+
+    async fn document_symbols(&self, uri: &str) -> Vec<SymbolPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+
+        declaration_symbols(&text)
+            .into_iter()
+            .map(|symbol| SymbolPayload {
+                uri: uri.to_string(),
+                name: symbol.name,
+                kind: symbol.kind,
+                range: symbol.range,
+            })
+            .collect()
+    }
+
+    async fn resolve_text(&self, uri: &str) -> Option<String> {
+        if let Some(cached) = self.latest_documents.get(uri) {
+            return Some(cached.text.clone());
+        }
+
+        read_document_from_uri(uri).await
     }
 
     fn session_dirs_for_uri(&self, uri: &str) -> Vec<PathBuf> {
@@ -694,6 +795,39 @@ pub async fn run_real_adapter(
                     .hover_markup(&payload.uri, payload.offset.clone())
                     .await;
                 markup_message_from_request(&request, &payload.uri, payload.offset, &info)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::Definition => {
+                let payload: QueryPayload = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let locations = state
+                    .definition_locations(&payload.uri, payload.offset)
+                    .await;
+                location_message_from_request(&request, MessageType::Definition, locations)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::References => {
+                let payload: QueryPayload = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let locations = state
+                    .reference_locations(&payload.uri, payload.offset)
+                    .await;
+                location_message_from_request(&request, MessageType::References, locations)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::Completion => {
+                let payload: QueryPayload = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let items = state.completion_items(&payload.uri, payload.offset).await;
+                completion_message_from_request(&request, items)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::DocumentSymbols => {
+                let payload: DocumentUriPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let symbols = state.document_symbols(&payload.uri).await;
+                symbols_message_from_request(&request, symbols)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::Diagnostics => {
@@ -892,6 +1026,246 @@ fn build_hover_info(text: &str, line: usize, col: usize) -> String {
     format!("Position: {line}:{col}\n{line_text}")
 }
 
+const COMPLETION_KEYWORDS: &[&str] = &[
+    "theory",
+    "imports",
+    "begin",
+    "end",
+    "lemma",
+    "theorem",
+    "corollary",
+    "proposition",
+    "definition",
+    "abbreviation",
+    "fun",
+    "function",
+    "primrec",
+    "datatype",
+    "record",
+    "type_synonym",
+    "locale",
+    "class",
+    "instantiation",
+    "context",
+    "assumes",
+    "shows",
+    "fixes",
+    "defines",
+    "where",
+    "proof",
+    "qed",
+    "by",
+    "sorry",
+    "oops",
+    "have",
+    "show",
+    "thus",
+    "hence",
+    "from",
+    "then",
+    "using",
+    "unfolding",
+    "apply",
+];
+
+#[derive(Clone)]
+struct DeclarationSymbol {
+    name: String,
+    kind: String,
+    range: Range,
+}
+
+fn declaration_kind(keyword: &str) -> Option<&'static str> {
+    match keyword {
+        "lemma" | "theorem" | "corollary" | "proposition" => Some("theorem"),
+        "definition" | "abbreviation" | "fun" | "function" | "primrec" => Some("function"),
+        "datatype" | "record" | "type_synonym" => Some("type"),
+        "locale" | "class" | "instantiation" => Some("module"),
+        _ => None,
+    }
+}
+
+fn declaration_symbols(text: &str) -> Vec<DeclarationSymbol> {
+    let mut symbols = Vec::new();
+    for (line_index, line_text) in text.lines().enumerate() {
+        let tokens = identifier_tokens_in_line(line_text);
+        if tokens.len() < 2 {
+            continue;
+        }
+
+        let keyword = tokens[0].0.as_str();
+        let Some(kind) = declaration_kind(keyword) else {
+            continue;
+        };
+
+        let name = tokens[1].0.clone();
+        symbols.push(DeclarationSymbol {
+            name,
+            kind: kind.to_string(),
+            range: Range {
+                start: Position {
+                    line: i64::try_from(line_index + 1).unwrap_or(i64::MAX),
+                    col: i64::try_from(tokens[1].1).unwrap_or(i64::MAX),
+                },
+                end: Position {
+                    line: i64::try_from(line_index + 1).unwrap_or(i64::MAX),
+                    col: i64::try_from(tokens[1].2).unwrap_or(i64::MAX),
+                },
+            },
+        });
+    }
+
+    symbols
+}
+
+fn identifier_at_position(text: &str, line: usize, col: usize) -> Option<(String, usize, usize)> {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() || line == 0 || line > lines.len() {
+        return None;
+    }
+    extract_identifier_at(lines[line - 1], col)
+}
+
+fn identifier_prefix_at_position(text: &str, line: usize, col: usize) -> Option<String> {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() || line == 0 || line > lines.len() {
+        return None;
+    }
+
+    let line_text = lines[line - 1];
+    if line_text.is_empty() {
+        return None;
+    }
+
+    let chars = line_text.char_indices().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+
+    let mut end = col.saturating_sub(1);
+    if end > chars.len() {
+        end = chars.len();
+    }
+
+    let mut start = end;
+    while start > 0 && is_identifier_char(chars[start - 1].1) {
+        start -= 1;
+    }
+
+    if start == end {
+        return None;
+    }
+
+    let start_byte = chars[start].0;
+    let end_byte = if end < chars.len() {
+        chars[end].0
+    } else {
+        line_text.len()
+    };
+
+    Some(line_text[start_byte..end_byte].to_string())
+}
+
+fn identifier_ranges(text: &str, identifier: &str) -> Vec<Range> {
+    let mut ranges = Vec::new();
+    for (line_index, line_text) in text.lines().enumerate() {
+        for (token, start_col, end_col) in identifier_tokens_in_line(line_text) {
+            if token != identifier {
+                continue;
+            }
+
+            ranges.push(Range {
+                start: Position {
+                    line: i64::try_from(line_index + 1).unwrap_or(i64::MAX),
+                    col: i64::try_from(start_col).unwrap_or(i64::MAX),
+                },
+                end: Position {
+                    line: i64::try_from(line_index + 1).unwrap_or(i64::MAX),
+                    col: i64::try_from(end_col).unwrap_or(i64::MAX),
+                },
+            });
+        }
+    }
+
+    ranges
+}
+
+fn keyword_completion_items(prefix: &str) -> Vec<CompletionItemPayload> {
+    COMPLETION_KEYWORDS
+        .iter()
+        .filter(|keyword| keyword.starts_with(prefix))
+        .map(|keyword| CompletionItemPayload {
+            label: (*keyword).to_string(),
+            detail: Some("keyword".to_string()),
+        })
+        .collect()
+}
+
+fn completion_items_from_text(text: &str, prefix: &str) -> Vec<CompletionItemPayload> {
+    let mut labels = std::collections::BTreeSet::new();
+
+    for keyword in COMPLETION_KEYWORDS {
+        if keyword.starts_with(prefix) {
+            labels.insert((*keyword).to_string());
+        }
+    }
+
+    for line in text.lines() {
+        for (token, _, _) in identifier_tokens_in_line(line) {
+            if prefix.is_empty() || token.starts_with(prefix) {
+                labels.insert(token);
+            }
+        }
+    }
+
+    labels
+        .into_iter()
+        .take(200)
+        .map(|label| CompletionItemPayload {
+            label,
+            detail: None,
+        })
+        .collect()
+}
+
+fn identifier_tokens_in_line(line_text: &str) -> Vec<(String, usize, usize)> {
+    let chars = line_text.char_indices().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if !is_identifier_char(chars[index].1) {
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index + 1 < chars.len() && is_identifier_char(chars[index + 1].1) {
+            index += 1;
+        }
+        let end = index;
+
+        let start_byte = chars[start].0;
+        let end_byte = if end + 1 < chars.len() {
+            chars[end + 1].0
+        } else {
+            line_text.len()
+        };
+        tokens.push((
+            line_text[start_byte..end_byte].to_string(),
+            start + 1,
+            end + 1,
+        ));
+
+        index += 1;
+    }
+
+    tokens
+}
+
 fn extract_identifier_at(line_text: &str, col: usize) -> Option<(String, usize, usize)> {
     let chars = line_text.char_indices().collect::<Vec<_>>();
     if chars.is_empty() {
@@ -1006,6 +1380,31 @@ Unfinished session(s): Draft
         let text = "theory Demo imports Main begin\nend\n";
         let info = build_hover_info(text, 10, 1);
         assert!(info.contains("outside document"));
+    }
+
+    #[test]
+    fn declaration_symbols_extracts_isabelle_entities() {
+        let text = "theory Demo imports Main begin\nlemma foo: True by simp\ndefinition bar where \"bar = True\"\nend\n";
+        let symbols = declaration_symbols(text);
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].name, "foo");
+        assert_eq!(symbols[1].name, "bar");
+    }
+
+    #[test]
+    fn identifier_ranges_finds_all_occurrences() {
+        let text = "lemma foo: True\nhave foo by simp\nshow foo by simp\n";
+        let ranges = identifier_ranges(text, "foo");
+        assert_eq!(ranges.len(), 3);
+    }
+
+    #[test]
+    fn completion_items_from_text_filters_by_prefix() {
+        let text = "lemma foo_bar: True by simp\ndefinition fooz where \"fooz = True\"\n";
+        let items = completion_items_from_text(text, "foo");
+        let labels = items.into_iter().map(|item| item.label).collect::<Vec<_>>();
+        assert!(labels.contains(&"foo_bar".to_string()));
+        assert!(labels.contains(&"fooz".to_string()));
     }
 
     #[test]

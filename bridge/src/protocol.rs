@@ -10,6 +10,14 @@ pub enum MessageType {
     DocumentPush,
     #[serde(rename = "document.check")]
     DocumentCheck,
+    #[serde(rename = "definition")]
+    Definition,
+    #[serde(rename = "references")]
+    References,
+    #[serde(rename = "completion")]
+    Completion,
+    #[serde(rename = "document.symbols")]
+    DocumentSymbols,
     #[serde(rename = "diagnostics")]
     Diagnostics,
     #[serde(rename = "markup")]
@@ -47,6 +55,43 @@ pub struct MarkupPayload {
     pub uri: String,
     pub offset: Position,
     pub info: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct QueryPayload {
+    pub uri: String,
+    pub offset: Position,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DocumentUriPayload {
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LocationPayload {
+    pub uri: String,
+    pub range: Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionItemPayload {
+    pub label: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SymbolPayload {
+    pub uri: String,
+    pub name: String,
+    pub kind: String,
+    pub range: Range,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,6 +171,26 @@ impl Message {
     pub fn check_payload(&self) -> Result<DocumentCheckPayload, ProtocolError> {
         self.payload_as()
     }
+
+    pub fn query_payload(&self) -> Result<QueryPayload, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn document_uri_payload(&self) -> Result<DocumentUriPayload, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn location_payload(&self) -> Result<Vec<LocationPayload>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn completion_payload(&self) -> Result<Vec<CompletionItemPayload>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn symbols_payload(&self) -> Result<Vec<SymbolPayload>, ProtocolError> {
+        self.payload_as()
+    }
 }
 
 pub fn diagnostics_message_from_request(
@@ -171,5 +236,45 @@ pub fn markup_message_from_request(
         session: request.session.clone(),
         version: request.version,
         payload: serde_json::to_value(payload)?,
+    })
+}
+
+pub fn location_message_from_request(
+    request: &Message,
+    msg_type: MessageType,
+    locations: Vec<LocationPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(locations)?,
+    })
+}
+
+pub fn completion_message_from_request(
+    request: &Message,
+    items: Vec<CompletionItemPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::Completion,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(items)?,
+    })
+}
+
+pub fn symbols_message_from_request(
+    request: &Message,
+    symbols: Vec<SymbolPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::DocumentSymbols,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(symbols)?,
     })
 }

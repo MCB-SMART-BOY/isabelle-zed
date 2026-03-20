@@ -101,7 +101,11 @@ async fn start_tcp_mock_adapter() -> (String, JoinHandle<()>) {
                         .expect("document.check payload must parse")
                         .uri
                 }
-                MessageType::Markup => continue,
+                MessageType::Markup
+                | MessageType::Definition
+                | MessageType::References
+                | MessageType::Completion
+                | MessageType::DocumentSymbols => continue,
                 MessageType::Diagnostics => continue,
             };
 

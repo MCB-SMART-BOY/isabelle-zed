@@ -6,7 +6,8 @@ mod transport;
 #[cfg(all(test, unix))]
 use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
-    DocumentCheckPayload, MarkupPayload, Message, MessageType, Position as BridgePosition,
+    CompletionItemPayload, DocumentCheckPayload, DocumentUriPayload, LocationPayload,
+    MarkupPayload, Message, MessageType, Position as BridgePosition, QueryPayload, SymbolPayload,
 };
 use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
 use push::{PushEvent, spawn_push_worker};
@@ -18,9 +19,12 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::Duration;
 use tower_lsp::jsonrpc::Result as JsonRpcResult;
 use tower_lsp::lsp_types::{
-    ExecuteCommandOptions, Hover, HoverContents, HoverProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, MarkedString, MessageType as LspMessageType, Position,
-    ServerCapabilities, ServerInfo, TextDocumentContentChangeEvent, TextDocumentItem,
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
+    DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandOptions, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, InitializeParams,
+    InitializeResult, InitializedParams, Location, MarkedString, MessageType as LspMessageType,
+    OneOf, Position, Range as LspRange, ReferenceParams, ServerCapabilities, ServerInfo,
+    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem,
     TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -237,6 +241,155 @@ impl IsabelleLanguageServer {
         }))
     }
 
+    async fn definition_locations(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+    ) -> Result<Vec<Location>, String> {
+        if !self.is_session_running().await {
+            return Ok(Vec::new());
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(QueryPayload {
+            uri: uri.to_string(),
+            offset: lsp_position_to_bridge(position),
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::Definition, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::Definition {
+            return Err(format!(
+                "unexpected response type from bridge: {:?}",
+                response.msg_type
+            ));
+        }
+
+        let payload = response.location_payload().map_err(|err| err.to_string())?;
+        Ok(payload
+            .into_iter()
+            .filter_map(bridge_location_to_lsp)
+            .collect())
+    }
+
+    async fn reference_locations(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+    ) -> Result<Vec<Location>, String> {
+        if !self.is_session_running().await {
+            return Ok(Vec::new());
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(QueryPayload {
+            uri: uri.to_string(),
+            offset: lsp_position_to_bridge(position),
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::References, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::References {
+            return Err(format!(
+                "unexpected response type from bridge: {:?}",
+                response.msg_type
+            ));
+        }
+
+        let payload = response.location_payload().map_err(|err| err.to_string())?;
+        Ok(payload
+            .into_iter()
+            .filter_map(bridge_location_to_lsp)
+            .collect())
+    }
+
+    async fn completion_items(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+    ) -> Result<Vec<CompletionItem>, String> {
+        if !self.is_session_running().await {
+            return Ok(Vec::new());
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(QueryPayload {
+            uri: uri.to_string(),
+            offset: lsp_position_to_bridge(position),
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::Completion, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::Completion {
+            return Err(format!(
+                "unexpected response type from bridge: {:?}",
+                response.msg_type
+            ));
+        }
+
+        let payload = response
+            .completion_payload()
+            .map_err(|err| err.to_string())?;
+        Ok(payload.into_iter().map(bridge_completion_to_lsp).collect())
+    }
+
+    async fn document_symbols(
+        &self,
+        uri: &Url,
+        version: i64,
+    ) -> Result<Vec<SymbolInformation>, String> {
+        if !self.is_session_running().await {
+            return Ok(Vec::new());
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(DocumentUriPayload {
+            uri: uri.to_string(),
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::DocumentSymbols, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::DocumentSymbols {
+            return Err(format!(
+                "unexpected response type from bridge: {:?}",
+                response.msg_type
+            ));
+        }
+
+        let payload = response.symbols_payload().map_err(|err| err.to_string())?;
+        Ok(payload
+            .into_iter()
+            .filter_map(bridge_symbol_to_lsp)
+            .collect())
+    }
+
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
         if !self.is_session_running().await {
             return Err("isabelle session is stopped".to_string());
@@ -337,6 +490,14 @@ impl LanguageServer for IsabelleLanguageServer {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
+                completion_provider: Some(CompletionOptions {
+                    resolve_provider: Some(false),
+                    trigger_characters: Some(vec![".".to_string(), "_".to_string()]),
+                    ..CompletionOptions::default()
+                }),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
                         COMMAND_START_SESSION.to_string(),
@@ -429,6 +590,91 @@ impl LanguageServer for IsabelleLanguageServer {
         }
     }
 
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> JsonRpcResult<Option<GotoDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.definition_locations(&uri, position, version).await {
+            Ok(locations) if locations.is_empty() => Ok(None),
+            Ok(locations) => Ok(Some(GotoDefinitionResponse::Array(locations))),
+            Err(err) => {
+                self.log_error(format!("failed to request definition: {err}"))
+                    .await;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn references(&self, params: ReferenceParams) -> JsonRpcResult<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.reference_locations(&uri, position, version).await {
+            Ok(locations) => Ok(Some(locations)),
+            Err(err) => {
+                self.log_error(format!("failed to request references: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> JsonRpcResult<Option<CompletionResponse>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.completion_items(&uri, position, version).await {
+            Ok(items) => Ok(Some(CompletionResponse::Array(items))),
+            Err(err) => {
+                self.log_error(format!("failed to request completion: {err}"))
+                    .await;
+                Ok(Some(CompletionResponse::Array(Vec::new())))
+            }
+        }
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> JsonRpcResult<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.document_symbols(&uri, version).await {
+            Ok(symbols) => Ok(Some(DocumentSymbolResponse::Flat(symbols))),
+            Err(err) => {
+                self.log_error(format!("failed to request document symbols: {err}"))
+                    .await;
+                Ok(Some(DocumentSymbolResponse::Flat(Vec::new())))
+            }
+        }
+    }
+
     async fn execute_command(
         &self,
         params: tower_lsp::lsp_types::ExecuteCommandParams,
@@ -489,6 +735,69 @@ fn lsp_position_to_bridge(position: Position) -> BridgePosition {
     BridgePosition {
         line: i64::from(position.line.saturating_add(1)),
         col: i64::from(position.character.saturating_add(1)),
+    }
+}
+
+fn bridge_range_to_lsp(range: bridge::protocol::Range) -> LspRange {
+    LspRange {
+        start: Position {
+            line: u32::try_from(range.start.line.saturating_sub(1)).unwrap_or(0),
+            character: u32::try_from(range.start.col.saturating_sub(1)).unwrap_or(0),
+        },
+        end: Position {
+            line: u32::try_from(range.end.line.saturating_sub(1)).unwrap_or(0),
+            character: u32::try_from(range.end.col.saturating_sub(1)).unwrap_or(0),
+        },
+    }
+}
+
+fn bridge_location_to_lsp(location: LocationPayload) -> Option<Location> {
+    let uri = Url::parse(&location.uri).ok()?;
+    Some(Location {
+        uri,
+        range: bridge_range_to_lsp(location.range),
+    })
+}
+
+fn bridge_completion_to_lsp(item: CompletionItemPayload) -> CompletionItem {
+    let kind = if item.detail.as_deref() == Some("keyword") {
+        Some(CompletionItemKind::KEYWORD)
+    } else {
+        Some(CompletionItemKind::TEXT)
+    };
+
+    CompletionItem {
+        label: item.label,
+        kind,
+        detail: item.detail,
+        ..CompletionItem::default()
+    }
+}
+
+#[allow(deprecated)]
+fn bridge_symbol_to_lsp(symbol: SymbolPayload) -> Option<SymbolInformation> {
+    let uri = Url::parse(&symbol.uri).ok()?;
+    let kind = bridge_symbol_kind(&symbol.kind);
+    Some(SymbolInformation {
+        name: symbol.name,
+        kind,
+        location: Location {
+            uri,
+            range: bridge_range_to_lsp(symbol.range),
+        },
+        tags: None,
+        deprecated: None,
+        container_name: None,
+    })
+}
+
+fn bridge_symbol_kind(kind: &str) -> SymbolKind {
+    match kind {
+        "type" => SymbolKind::STRUCT,
+        "module" => SymbolKind::MODULE,
+        "function" => SymbolKind::FUNCTION,
+        "theorem" => SymbolKind::CONSTANT,
+        _ => SymbolKind::VARIABLE,
     }
 }
 

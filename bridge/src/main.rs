@@ -1,5 +1,5 @@
 use bridge::process::{ProcessError, ProcessManager, run_mock_adapter, run_real_adapter};
-use bridge::protocol::{MessageType, parse_message};
+use bridge::protocol::{MarkupPayload, Message, MessageType, parse_message};
 use bridge::queue::{DebounceQueue, QueueError};
 use clap::Parser;
 #[cfg(unix)]
@@ -284,19 +284,12 @@ where
                             Ok(message) => {
                                 if message.msg_type == MessageType::DocumentPush {
                                     debounce.enqueue(message)?;
-                                } else if message.msg_type == MessageType::DocumentCheck {
-                                    match message.check_payload() {
-                                        Ok(payload) => {
-                                            if let Some(pending) = debounce.drain_for_uri(&payload.uri) {
-                                                process.send(&pending).await?;
-                                            }
-                                        }
-                                        Err(err) => {
-                                            warn!("document.check payload parse failed: {err}");
-                                        }
-                                    }
-                                    process.send(&message).await?;
                                 } else {
+                                    if let Some(uri) = pending_uri_for_message(&message)
+                                        && let Some(pending) = debounce.drain_for_uri(&uri)
+                                    {
+                                        process.send(&pending).await?;
+                                    }
                                     process.send(&message).await?;
                                 }
                             }
@@ -337,4 +330,22 @@ where
 
     process.stop().await?;
     Ok(())
+}
+
+fn pending_uri_for_message(message: &Message) -> Option<String> {
+    match message.msg_type {
+        MessageType::DocumentCheck => message.check_payload().ok().map(|payload| payload.uri),
+        MessageType::Markup => message
+            .payload_as::<MarkupPayload>()
+            .ok()
+            .map(|payload| payload.uri),
+        MessageType::Definition | MessageType::References | MessageType::Completion => {
+            message.query_payload().ok().map(|payload| payload.uri)
+        }
+        MessageType::DocumentSymbols => message
+            .document_uri_payload()
+            .ok()
+            .map(|payload| payload.uri),
+        MessageType::DocumentPush | MessageType::Diagnostics => None,
+    }
 }
