@@ -1769,13 +1769,127 @@ fn build_hover_info(text: &str, line: usize, col: usize) -> String {
     }
 
     let line_text = lines[line - 1];
-    if let Some((identifier, start_col, end_col)) = identifier_at_position(text, line, col) {
-        return format!(
-            "Identifier: {identifier}\nRange: {line}:{start_col}-{line}:{end_col}\n{line_text}"
-        );
+    let mut info = if let Some((identifier, start_col, end_col)) =
+        identifier_at_position(text, line, col)
+    {
+        format!("Identifier: {identifier}\nRange: {line}:{start_col}-{line}:{end_col}\n{line_text}")
+    } else {
+        format!("Position: {line}:{col}\n{line_text}")
+    };
+
+    if let Some(goal_hint) = proof_goal_hint(text, line) {
+        info.push_str("\n\n");
+        info.push_str(&goal_hint);
     }
 
-    format!("Position: {line}:{col}\n{line_text}")
+    info
+}
+
+fn proof_goal_hint(text: &str, cursor_line: usize) -> Option<String> {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() || cursor_line == 0 || cursor_line > lines.len() {
+        return None;
+    }
+
+    let cursor_index = cursor_line.saturating_sub(1);
+    let declaration_index = (0..=cursor_index)
+        .rev()
+        .find(|index| parse_theorem_declaration(lines[*index]).is_some())?;
+
+    let (context, fallback_goal) = parse_theorem_declaration(lines[declaration_index])?;
+    let block_end = ((declaration_index + 1)..lines.len())
+        .find(|index| line_has_proof_terminator(lines[*index]))
+        .unwrap_or(lines.len().saturating_sub(1));
+    if cursor_index > block_end {
+        return None;
+    }
+
+    let active_goal = (declaration_index..=cursor_index)
+        .rev()
+        .find_map(|index| parse_goal_statement_line(lines[index]))
+        .or(fallback_goal)?;
+
+    Some(format!(
+        "Proof Goal (heuristic): {active_goal}\nContext: {context}\nScope: lines {}-{}",
+        declaration_index + 1,
+        block_end + 1
+    ))
+}
+
+fn parse_theorem_declaration(line: &str) -> Option<(String, Option<String>)> {
+    let spans = line_identifier_spans(line);
+    let (keyword, _, _) = spans.first()?;
+    if !matches!(
+        keyword.as_str(),
+        "lemma" | "theorem" | "corollary" | "proposition"
+    ) {
+        return None;
+    }
+
+    let name = spans
+        .get(1)
+        .map(|(name, _, _)| name.as_str())
+        .unwrap_or("<anonymous>");
+    let context = format!("{keyword} {name}");
+    let statement = extract_quoted_statement(line).or_else(|| extract_statement_after_colon(line));
+    Some((context, statement))
+}
+
+fn parse_goal_statement_line(line: &str) -> Option<String> {
+    let spans = line_identifier_spans(line);
+    let (keyword, _, _) = spans.first()?;
+    if !matches!(keyword.as_str(), "show" | "have" | "thus" | "hence") {
+        return None;
+    }
+
+    extract_quoted_statement(line).or_else(|| {
+        let (_, tail) = line.split_once(keyword)?;
+        let trimmed = tail.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let without_by = trimmed
+            .split_once(" by ")
+            .map(|(head, _)| head)
+            .unwrap_or(trimmed)
+            .trim()
+            .trim_end_matches(';')
+            .trim_end_matches('.');
+        if without_by.is_empty() {
+            None
+        } else {
+            Some(without_by.to_string())
+        }
+    })
+}
+
+fn extract_quoted_statement(line: &str) -> Option<String> {
+    let start = line.find('"')?;
+    let rest = &line[start + 1..];
+    let end = rest.find('"')?;
+    let statement = rest[..end].trim();
+    if statement.is_empty() {
+        None
+    } else {
+        Some(statement.to_string())
+    }
+}
+
+fn extract_statement_after_colon(line: &str) -> Option<String> {
+    let (_, tail) = line.split_once(':')?;
+    let statement = tail.trim().trim_end_matches(';').trim_end_matches('.');
+    if statement.is_empty() {
+        None
+    } else {
+        Some(statement.to_string())
+    }
+}
+
+fn line_has_proof_terminator(line: &str) -> bool {
+    line_identifier_spans(line)
+        .into_iter()
+        .any(|(token, _, _)| matches!(token.as_str(), "qed" | "oops" | "sorry" | "done"))
 }
 
 fn signature_help_from_text(text: &str, line: usize, col: usize) -> Option<SignatureHelpPayload> {
@@ -2955,6 +3069,21 @@ Unfinished session(s): Draft
         let text = "theory Demo imports Main begin\nend\n";
         let info = build_hover_info(text, 10, 1);
         assert!(info.contains("outside document"));
+    }
+
+    #[test]
+    fn build_hover_info_includes_proof_goal_hint() {
+        let text = "theory Demo imports Main begin\nlemma plus_comm: \"a + b = b + a\"\nproof\n  show \"a + b = b + a\" by simp\nqed\nend\n";
+        let info = build_hover_info(text, 4, 8);
+        assert!(info.contains("Proof Goal (heuristic): a + b = b + a"));
+        assert!(info.contains("Context: lemma plus_comm"));
+    }
+
+    #[test]
+    fn build_hover_info_without_proof_goal_for_non_theorem() {
+        let text = "theory Demo imports Main begin\ndefinition foo where \"foo = True\"\nend\n";
+        let info = build_hover_info(text, 2, 12);
+        assert!(!info.contains("Proof Goal (heuristic):"));
     }
 
     #[test]
