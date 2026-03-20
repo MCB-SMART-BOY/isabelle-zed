@@ -351,6 +351,10 @@ fn pending_uri_for_message(message: &Message) -> Option<String> {
             .document_uri_payload()
             .ok()
             .map(|payload| payload.uri),
+        MessageType::SemanticTokens => message
+            .document_uri_payload()
+            .ok()
+            .map(|payload| payload.uri),
         MessageType::DocumentPush | MessageType::Diagnostics => None,
     }
 }

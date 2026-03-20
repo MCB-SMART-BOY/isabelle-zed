@@ -22,6 +22,8 @@ pub enum MessageType {
     Rename,
     #[serde(rename = "code_action")]
     CodeAction,
+    #[serde(rename = "semantic_tokens")]
+    SemanticTokens,
     #[serde(rename = "diagnostics")]
     Diagnostics,
     #[serde(rename = "markup")]
@@ -120,6 +122,16 @@ pub struct CodeActionPayload {
     pub title: String,
     pub kind: String,
     pub edits: Vec<TextEditPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticTokenPayload {
+    pub uri: String,
+    pub line: i64,
+    pub col: i64,
+    pub length: i64,
+    pub token_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -229,6 +241,10 @@ impl Message {
     }
 
     pub fn code_actions_payload(&self) -> Result<Vec<CodeActionPayload>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn semantic_tokens_payload(&self) -> Result<Vec<SemanticTokenPayload>, ProtocolError> {
         self.payload_as()
     }
 }
@@ -343,5 +359,18 @@ pub fn code_actions_message_from_request(
         session: request.session.clone(),
         version: request.version,
         payload: serde_json::to_value(actions)?,
+    })
+}
+
+pub fn semantic_tokens_message_from_request(
+    request: &Message,
+    tokens: Vec<SemanticTokenPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::SemanticTokens,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(tokens)?,
     })
 }

@@ -1,9 +1,11 @@
 use crate::protocol::{
     CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentUriPayload, LocationPayload,
-    Message, MessageType, Position, QueryPayload, Range, RenamePayload, Severity, SymbolPayload,
-    TextEditPayload, code_actions_message_from_request, completion_message_from_request,
-    diagnostics_message_from_request, location_message_from_request, markup_message_from_request,
-    parse_message, symbols_message_from_request, text_edits_message_from_request, to_ndjson,
+    Message, MessageType, Position, QueryPayload, Range, RenamePayload, SemanticTokenPayload,
+    Severity, SymbolPayload, TextEditPayload, code_actions_message_from_request,
+    completion_message_from_request, diagnostics_message_from_request,
+    location_message_from_request, markup_message_from_request, parse_message,
+    semantic_tokens_message_from_request, symbols_message_from_request,
+    text_edits_message_from_request, to_ndjson,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -464,6 +466,10 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 code_actions_message_from_request(&request, Vec::<CodeActionPayload>::new())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
+            MessageType::SemanticTokens => {
+                semantic_tokens_message_from_request(&request, Vec::<SemanticTokenPayload>::new())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
             MessageType::Diagnostics => {
                 continue;
             }
@@ -709,6 +715,41 @@ impl RealAdapterState {
             .collect()
     }
 
+    async fn semantic_tokens(&self, uri: &str) -> Vec<SemanticTokenPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+
+        let declaration_kinds = declaration_symbols(&text)
+            .into_iter()
+            .map(|symbol| (symbol.name, symbol.kind))
+            .collect::<HashMap<_, _>>();
+
+        let mut tokens = Vec::new();
+        for (line_index, line_text) in text.lines().enumerate() {
+            for (token, start_col, end_col) in identifier_tokens_in_line(line_text) {
+                let token_type = if COMPLETION_KEYWORDS.contains(&token.as_str()) {
+                    "keyword"
+                } else if let Some(kind) = declaration_kinds.get(&token) {
+                    semantic_token_type_from_declaration_kind(kind)
+                } else {
+                    "variable"
+                };
+
+                let length = end_col.saturating_sub(start_col).saturating_add(1);
+                tokens.push(SemanticTokenPayload {
+                    uri: uri.to_string(),
+                    line: i64::try_from(line_index + 1).unwrap_or(i64::MAX),
+                    col: i64::try_from(start_col).unwrap_or(i64::MAX),
+                    length: i64::try_from(length).unwrap_or(i64::MAX),
+                    token_type: token_type.to_string(),
+                });
+            }
+        }
+
+        tokens
+    }
+
     async fn rename_edits(
         &self,
         uri: &str,
@@ -922,6 +963,14 @@ pub async fn run_real_adapter(
                         .map_err(|err| ProcessError::Protocol(err.to_string()))?;
                 let actions = state.code_actions(&payload.uri).await;
                 code_actions_message_from_request(&request, actions)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::SemanticTokens => {
+                let payload: DocumentUriPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let tokens = state.semantic_tokens(&payload.uri).await;
+                semantic_tokens_message_from_request(&request, tokens)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::Diagnostics => {
@@ -1176,6 +1225,15 @@ fn declaration_kind(keyword: &str) -> Option<&'static str> {
         "datatype" | "record" | "type_synonym" => Some("type"),
         "locale" | "class" | "instantiation" => Some("module"),
         _ => None,
+    }
+}
+
+fn semantic_token_type_from_declaration_kind(kind: &str) -> &'static str {
+    match kind {
+        "type" => "type",
+        "module" => "namespace",
+        "function" | "theorem" => "function",
+        _ => "variable",
     }
 }
 
@@ -1542,6 +1600,34 @@ Unfinished session(s): Draft
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].kind, "quickfix");
         assert_eq!(actions[0].edits[0].new_text, "by simp");
+    }
+
+    #[tokio::test]
+    async fn semantic_tokens_marks_keywords_and_declarations() {
+        let uri = "file:///tmp/Example.thy";
+        let text = "theory Demo imports Main begin\nlemma foo: True by simp\nend\n";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: text.to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let tokens = state.semantic_tokens(uri).await;
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.token_type == "keyword" && token.line == 1)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.token_type == "function" && token.line == 2)
+        );
     }
 
     #[test]

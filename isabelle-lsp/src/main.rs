@@ -8,7 +8,8 @@ use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
     CodeActionPayload as BridgeCodeActionPayload, CompletionItemPayload, DocumentCheckPayload,
     DocumentUriPayload, LocationPayload, MarkupPayload, Message, MessageType,
-    Position as BridgePosition, QueryPayload, RenamePayload, SymbolPayload, TextEditPayload,
+    Position as BridgePosition, QueryPayload, RenamePayload, SemanticTokenPayload, SymbolPayload,
+    TextEditPayload,
 };
 use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
 use push::{PushEvent, spawn_push_worker};
@@ -26,9 +27,12 @@ use tower_lsp::lsp_types::{
     DocumentSymbolResponse, ExecuteCommandOptions, GotoDefinitionParams, GotoDefinitionResponse,
     Hover, HoverContents, HoverProviderCapability, InitializeParams, InitializeResult,
     InitializedParams, Location, MarkedString, MessageType as LspMessageType, OneOf, Position,
-    Range as LspRange, ReferenceParams, RenameParams, ServerCapabilities, ServerInfo,
-    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
+    Range as LspRange, ReferenceParams, RenameParams, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo, SymbolInformation,
+    SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info};
@@ -467,6 +471,44 @@ impl IsabelleLanguageServer {
             .collect())
     }
 
+    async fn semantic_tokens(
+        &self,
+        uri: &Url,
+        version: i64,
+    ) -> Result<SemanticTokensResult, String> {
+        if !self.is_session_running().await {
+            return Ok(SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: Vec::new(),
+            }));
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(DocumentUriPayload {
+            uri: uri.to_string(),
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::SemanticTokens, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::SemanticTokens {
+            return Err(format!(
+                "unexpected response type from bridge: {:?}",
+                response.msg_type
+            ));
+        }
+
+        let payload = response
+            .semantic_tokens_payload()
+            .map_err(|err| err.to_string())?;
+        Ok(bridge_semantic_tokens_to_lsp(payload))
+    }
+
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
         if !self.is_session_running().await {
             return Err("isabelle session is stopped".to_string());
@@ -577,6 +619,16 @@ impl LanguageServer for IsabelleLanguageServer {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: Default::default(),
+                            legend: semantic_tokens_legend(),
+                            range: Some(false),
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
                         COMMAND_START_SESSION.to_string(),
@@ -797,6 +849,30 @@ impl LanguageServer for IsabelleLanguageServer {
         }
     }
 
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> JsonRpcResult<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.semantic_tokens(&uri, version).await {
+            Ok(tokens) => Ok(Some(tokens)),
+            Err(err) => {
+                self.log_error(format!("failed to request semantic tokens: {err}"))
+                    .await;
+                Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+                    result_id: None,
+                    data: Vec::new(),
+                })))
+            }
+        }
+    }
+
     async fn execute_command(
         &self,
         params: tower_lsp::lsp_types::ExecuteCommandParams,
@@ -967,6 +1043,74 @@ fn bridge_code_action_kind(kind: &str) -> Option<CodeActionKind> {
         "refactor" => Some(CodeActionKind::REFACTOR),
         _ => None,
     }
+}
+
+fn semantic_tokens_legend() -> SemanticTokensLegend {
+    SemanticTokensLegend {
+        token_types: vec![
+            SemanticTokenType::KEYWORD,
+            SemanticTokenType::FUNCTION,
+            SemanticTokenType::TYPE,
+            SemanticTokenType::NAMESPACE,
+            SemanticTokenType::VARIABLE,
+        ],
+        token_modifiers: vec![SemanticTokenModifier::DECLARATION],
+    }
+}
+
+fn semantic_token_type_index(token_type: &str) -> u32 {
+    match token_type {
+        "keyword" => 0,
+        "function" => 1,
+        "type" => 2,
+        "namespace" => 3,
+        _ => 4,
+    }
+}
+
+fn bridge_semantic_tokens_to_lsp(tokens: Vec<SemanticTokenPayload>) -> SemanticTokensResult {
+    let mut tokens = tokens
+        .into_iter()
+        .filter_map(|token| {
+            let line = u32::try_from(token.line.saturating_sub(1)).ok()?;
+            let start = u32::try_from(token.col.saturating_sub(1)).ok()?;
+            let length = u32::try_from(token.length.max(0)).ok()?;
+            Some((line, start, length, token.token_type))
+        })
+        .collect::<Vec<_>>();
+    tokens.sort_by_key(|(line, start, _, _)| (*line, *start));
+
+    let mut encoded = Vec::with_capacity(tokens.len());
+    let mut prev_line = 0_u32;
+    let mut prev_start = 0_u32;
+    let mut is_first = true;
+
+    for (line, start, length, token_type) in tokens {
+        let (delta_line, delta_start) = if is_first {
+            is_first = false;
+            (line, start)
+        } else if line == prev_line {
+            (0, start.saturating_sub(prev_start))
+        } else {
+            (line.saturating_sub(prev_line), start)
+        };
+
+        prev_line = line;
+        prev_start = start;
+
+        encoded.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type: semantic_token_type_index(&token_type),
+            token_modifiers_bitset: 0,
+        });
+    }
+
+    SemanticTokensResult::Tokens(SemanticTokens {
+        result_id: None,
+        data: encoded,
+    })
 }
 
 fn default_bridge_endpoint() -> BridgeEndpoint {
