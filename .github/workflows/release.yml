@@ -2,9 +2,15 @@ name: Release
 
 on:
   push:
+    branches:
+      - chore/rust-workspace-dedup
     tags:
       - 'v*'
   workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -45,6 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [verify]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v5
 
