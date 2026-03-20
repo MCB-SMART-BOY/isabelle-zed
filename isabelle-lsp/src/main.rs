@@ -34,17 +34,20 @@ use tower_lsp::lsp_types::request::{
     GotoImplementationResponse, GotoTypeDefinitionParams, GotoTypeDefinitionResponse,
 };
 use tower_lsp::lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions, CodeLensParams,
-    Command, CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams,
-    CompletionResponse, DeclarationCapability, DocumentFormattingParams, DocumentHighlight,
-    DocumentHighlightKind, DocumentHighlightParams, DocumentLink, DocumentLinkOptions,
-    DocumentLinkParams, DocumentOnTypeFormattingOptions, DocumentOnTypeFormattingParams,
-    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse,
-    ExecuteCommandOptions, FoldingRange, FoldingRangeParams, FoldingRangeProviderCapability,
-    FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverProviderCapability, ImplementationProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions, InlayHintParams,
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
+    CallHierarchyServerCapability, CodeAction, CodeActionKind, CodeActionOrCommand,
+    CodeActionParams, CodeActionProviderCapability, CodeActionResponse, CodeLens, CodeLensOptions,
+    CodeLensParams, Command, CompletionItem, CompletionItemKind, CompletionOptions,
+    CompletionParams, CompletionResponse, DeclarationCapability, DocumentFormattingParams,
+    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
+    DocumentLinkOptions, DocumentLinkParams, DocumentOnTypeFormattingOptions,
+    DocumentOnTypeFormattingParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, ExecuteCommandOptions, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, FormattingOptions, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability,
+    ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    InlayHint, InlayHintKind, InlayHintLabel, InlayHintOptions, InlayHintParams,
     InlayHintServerCapabilities, Location, MarkedString, MessageType as LspMessageType, OneOf,
     ParameterInformation, ParameterLabel, Position, PrepareRenameResponse, Range as LspRange,
     ReferenceParams, RenameOptions, RenameParams, SelectionRange, SelectionRangeParams,
@@ -708,6 +711,213 @@ impl IsabelleLanguageServer {
             .collect())
     }
 
+    async fn prepare_call_hierarchy_items(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+    ) -> Result<Vec<CallHierarchyItem>, String> {
+        let mut items = self
+            .document_symbols(uri, version)
+            .await?
+            .into_iter()
+            .filter(|symbol| {
+                symbol.location.uri == *uri
+                    && lsp_position_in_range(position, symbol.location.range)
+            })
+            .map(call_hierarchy_item_from_symbol)
+            .collect::<Vec<_>>();
+
+        if items.is_empty() {
+            let identifier = self
+                .document_snapshot(uri)
+                .await
+                .and_then(|snapshot| identifier_at_position_in_text(&snapshot.text, position));
+            let definitions = self.definition_locations(uri, position, version).await?;
+
+            if !definitions.is_empty() {
+                let name = identifier
+                    .as_ref()
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| "symbol".to_string());
+
+                for definition in definitions {
+                    items.push(call_hierarchy_item_from_parts(
+                        name.clone(),
+                        SymbolKind::VARIABLE,
+                        definition.uri,
+                        definition.range,
+                        Some("definition".to_string()),
+                    ));
+                }
+            } else if let Some((name, range)) = identifier {
+                items.push(call_hierarchy_item_from_parts(
+                    name,
+                    SymbolKind::VARIABLE,
+                    uri.clone(),
+                    range,
+                    Some("local identifier".to_string()),
+                ));
+            }
+        }
+
+        items.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.uri.as_str().cmp(b.uri.as_str()))
+                .then_with(|| a.range.start.line.cmp(&b.range.start.line))
+                .then_with(|| a.range.start.character.cmp(&b.range.start.character))
+        });
+        items.dedup_by(|a, b| call_hierarchy_item_key(a) == call_hierarchy_item_key(b));
+        Ok(items)
+    }
+
+    async fn incoming_call_hierarchy(
+        &self,
+        item: CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyIncomingCall>, String> {
+        let version = self
+            .document_snapshot(&item.uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        let references = self
+            .reference_locations(&item.uri, item.selection_range.start, version)
+            .await?;
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut symbols_by_uri: HashMap<Url, Vec<SymbolInformation>> = HashMap::new();
+        for symbol in self.workspace_symbols(String::new()).await? {
+            symbols_by_uri
+                .entry(symbol.location.uri.clone())
+                .or_default()
+                .push(symbol);
+        }
+
+        let mut grouped: HashMap<String, (CallHierarchyItem, Vec<LspRange>)> = HashMap::new();
+        for location in references {
+            if location.uri == item.uri && ranges_overlap(location.range, item.selection_range) {
+                continue;
+            }
+
+            let from_item = symbols_by_uri
+                .get(&location.uri)
+                .and_then(|symbols| best_enclosing_symbol(symbols, location.range.start))
+                .cloned()
+                .map(call_hierarchy_item_from_symbol)
+                .unwrap_or_else(|| {
+                    let fallback_name = location
+                        .uri
+                        .path_segments()
+                        .and_then(|mut segments| segments.next_back())
+                        .filter(|segment| !segment.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| location.uri.to_string());
+                    call_hierarchy_item_from_parts(
+                        fallback_name,
+                        SymbolKind::FILE,
+                        location.uri.clone(),
+                        location.range,
+                        Some("file scope".to_string()),
+                    )
+                });
+
+            let key = call_hierarchy_item_key(&from_item);
+            let entry = grouped
+                .entry(key)
+                .or_insert_with(|| (from_item, Vec::new()));
+            entry.1.push(location.range);
+        }
+
+        let mut incoming = grouped
+            .into_values()
+            .map(|(from, ranges)| CallHierarchyIncomingCall {
+                from,
+                from_ranges: normalize_ranges(ranges),
+            })
+            .collect::<Vec<_>>();
+
+        incoming.sort_by(|a, b| {
+            a.from
+                .name
+                .cmp(&b.from.name)
+                .then_with(|| a.from.uri.as_str().cmp(b.from.uri.as_str()))
+                .then_with(|| a.from.range.start.line.cmp(&b.from.range.start.line))
+                .then_with(|| {
+                    a.from
+                        .range
+                        .start
+                        .character
+                        .cmp(&b.from.range.start.character)
+                })
+        });
+        Ok(incoming)
+    }
+
+    async fn outgoing_call_hierarchy(
+        &self,
+        item: CallHierarchyItem,
+    ) -> Result<Vec<CallHierarchyOutgoingCall>, String> {
+        let Some(snapshot) = self.document_snapshot(&item.uri).await else {
+            return Ok(Vec::new());
+        };
+        let references = identifier_references_in_range(&snapshot.text, item.range, &item.name);
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut symbols_by_name: HashMap<String, Vec<SymbolInformation>> = HashMap::new();
+        for symbol in self.workspace_symbols(String::new()).await? {
+            symbols_by_name
+                .entry(symbol.name.clone())
+                .or_default()
+                .push(symbol);
+        }
+
+        let mut grouped: HashMap<String, (CallHierarchyItem, Vec<LspRange>)> = HashMap::new();
+        for (token, from_range) in references {
+            let Some(candidates) = symbols_by_name.get(&token) else {
+                continue;
+            };
+
+            let target = candidates
+                .iter()
+                .filter(|candidate| {
+                    !(candidate.location.uri == item.uri
+                        && ranges_overlap(candidate.location.range, item.selection_range))
+                })
+                .find(|candidate| candidate.location.uri == item.uri)
+                .or_else(|| candidates.first());
+            let Some(target) = target.cloned() else {
+                continue;
+            };
+
+            let to_item = call_hierarchy_item_from_symbol(target);
+            let key = call_hierarchy_item_key(&to_item);
+            let entry = grouped.entry(key).or_insert_with(|| (to_item, Vec::new()));
+            entry.1.push(from_range);
+        }
+
+        let mut outgoing = grouped
+            .into_values()
+            .map(|(to, ranges)| CallHierarchyOutgoingCall {
+                to,
+                from_ranges: normalize_ranges(ranges),
+            })
+            .collect::<Vec<_>>();
+        outgoing.sort_by(|a, b| {
+            a.to.name
+                .cmp(&b.to.name)
+                .then_with(|| a.to.uri.as_str().cmp(b.to.uri.as_str()))
+                .then_with(|| a.to.range.start.line.cmp(&b.to.range.start.line))
+                .then_with(|| a.to.range.start.character.cmp(&b.to.range.start.character))
+        });
+        Ok(outgoing)
+    }
+
     async fn type_definition_locations(
         &self,
         uri: &Url,
@@ -1162,6 +1372,7 @@ impl LanguageServer for IsabelleLanguageServer {
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 declaration_provider: Some(DeclarationCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
@@ -1412,6 +1623,60 @@ impl LanguageServer for IsabelleLanguageServer {
             Ok(locations) => Ok(Some(locations)),
             Err(err) => {
                 self.log_error(format!("failed to request references: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> JsonRpcResult<Option<Vec<CallHierarchyItem>>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self
+            .prepare_call_hierarchy_items(&uri, position, version)
+            .await
+        {
+            Ok(items) if items.is_empty() => Ok(None),
+            Ok(items) => Ok(Some(items)),
+            Err(err) => {
+                self.log_error(format!("failed to prepare call hierarchy: {err}"))
+                    .await;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> JsonRpcResult<Option<Vec<CallHierarchyIncomingCall>>> {
+        match self.incoming_call_hierarchy(params.item).await {
+            Ok(calls) => Ok(Some(calls)),
+            Err(err) => {
+                self.log_error(format!("failed to compute incoming calls: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> JsonRpcResult<Option<Vec<CallHierarchyOutgoingCall>>> {
+        match self.outgoing_call_hierarchy(params.item).await {
+            Ok(calls) => Ok(Some(calls)),
+            Err(err) => {
+                self.log_error(format!("failed to compute outgoing calls: {err}"))
                     .await;
                 Ok(Some(Vec::new()))
             }
@@ -1934,6 +2199,175 @@ fn identifier_bounds_in_line(line: &str, character: u32) -> Option<(u32, u32)> {
     let start_u32 = u32::try_from(start).unwrap_or(0);
     let end_exclusive = u32::try_from(end.saturating_add(1)).unwrap_or(u32::MAX);
     Some((start_u32, end_exclusive))
+}
+
+fn identifier_at_position_in_text(text: &str, position: Position) -> Option<(String, LspRange)> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let line_index = usize::try_from(position.line).ok()?;
+    let line = lines.get(line_index)?;
+    let (start, end) = identifier_bounds_in_line(line, position.character)?;
+    if end <= start {
+        return None;
+    }
+
+    let start_index = usize::try_from(start).ok()?;
+    let len = usize::try_from(end.saturating_sub(start)).ok()?;
+    let name = line.chars().skip(start_index).take(len).collect::<String>();
+    if name.is_empty() {
+        return None;
+    }
+
+    Some((
+        name,
+        LspRange {
+            start: Position {
+                line: position.line,
+                character: start,
+            },
+            end: Position {
+                line: position.line,
+                character: end,
+            },
+        },
+    ))
+}
+
+fn call_hierarchy_item_from_symbol(symbol: SymbolInformation) -> CallHierarchyItem {
+    call_hierarchy_item_from_parts(
+        symbol.name,
+        symbol.kind,
+        symbol.location.uri,
+        symbol.location.range,
+        symbol.container_name,
+    )
+}
+
+fn call_hierarchy_item_from_parts(
+    name: String,
+    kind: SymbolKind,
+    uri: Url,
+    range: LspRange,
+    detail: Option<String>,
+) -> CallHierarchyItem {
+    CallHierarchyItem {
+        name,
+        kind,
+        tags: None,
+        detail,
+        uri,
+        range,
+        selection_range: range,
+        data: None,
+    }
+}
+
+fn call_hierarchy_item_key(item: &CallHierarchyItem) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}",
+        item.uri,
+        item.name,
+        item.range.start.line,
+        item.range.start.character,
+        item.range.end.line,
+        item.range.end.character
+    )
+}
+
+fn range_span_key(range: LspRange) -> (u32, u32) {
+    (
+        range.end.line.saturating_sub(range.start.line),
+        range.end.character.saturating_sub(range.start.character),
+    )
+}
+
+fn best_enclosing_symbol(
+    symbols: &[SymbolInformation],
+    position: Position,
+) -> Option<&SymbolInformation> {
+    symbols
+        .iter()
+        .filter(|symbol| lsp_position_in_range(position, symbol.location.range))
+        .min_by_key(|symbol| range_span_key(symbol.location.range))
+}
+
+fn ranges_overlap(a: LspRange, b: LspRange) -> bool {
+    if a.end.line < b.start.line || b.end.line < a.start.line {
+        return false;
+    }
+    if a.end.line == b.start.line && a.end.character <= b.start.character {
+        return false;
+    }
+    if b.end.line == a.start.line && b.end.character <= a.start.character {
+        return false;
+    }
+    true
+}
+
+fn normalize_ranges(mut ranges: Vec<LspRange>) -> Vec<LspRange> {
+    ranges.sort_by(|a, b| {
+        a.start
+            .line
+            .cmp(&b.start.line)
+            .then_with(|| a.start.character.cmp(&b.start.character))
+            .then_with(|| a.end.line.cmp(&b.end.line))
+            .then_with(|| a.end.character.cmp(&b.end.character))
+    });
+    ranges.dedup_by(|a, b| a == b);
+    ranges
+}
+
+fn identifier_references_in_range(
+    text: &str,
+    scope: LspRange,
+    current_name: &str,
+) -> Vec<(String, LspRange)> {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    let start_line = usize::try_from(scope.start.line).unwrap_or(usize::MAX);
+    if start_line >= lines.len() {
+        return Vec::new();
+    }
+    let mut end_line = usize::try_from(scope.end.line).unwrap_or(lines.len().saturating_sub(1));
+    if end_line >= lines.len() {
+        end_line = lines.len().saturating_sub(1);
+    }
+    if end_line < start_line {
+        return Vec::new();
+    }
+
+    let mut references = Vec::new();
+    for (line_index, line_text) in lines[start_line..=end_line].iter().enumerate() {
+        let line = u32::try_from(start_line.saturating_add(line_index)).unwrap_or(u32::MAX);
+        for (token, start, end) in line_identifier_spans(line_text) {
+            if token == current_name || token.is_empty() {
+                continue;
+            }
+            if line == scope.start.line && end <= scope.start.character {
+                continue;
+            }
+            if line == scope.end.line && start >= scope.end.character {
+                continue;
+            }
+
+            references.push((
+                token,
+                LspRange {
+                    start: Position {
+                        line,
+                        character: start,
+                    },
+                    end: Position {
+                        line,
+                        character: end,
+                    },
+                },
+            ));
+        }
+    }
+    references
 }
 
 fn is_isabelle_identifier_char(ch: char) -> bool {
@@ -3245,6 +3679,105 @@ mod tests {
                 .and_then(|line| line.parent.as_ref())
                 .is_some()
         );
+    }
+
+    #[test]
+    fn identifier_at_position_in_text_extracts_name_and_range() {
+        let text = "theory Demo imports Main begin\nlemma foo_bar: True\nend\n";
+        let (name, range) = super::identifier_at_position_in_text(
+            text,
+            Position {
+                line: 1,
+                character: 8,
+            },
+        )
+        .expect("identifier should exist");
+
+        assert_eq!(name, "foo_bar");
+        assert_eq!(range.start.line, 1);
+        assert_eq!(range.start.character, 6);
+        assert_eq!(range.end.character, 13);
+    }
+
+    #[test]
+    fn identifier_references_in_range_collects_non_self_tokens() {
+        let text = "theory Demo imports Main begin\nlemma foo: True\n  using bar baz\nend\n";
+        let refs = super::identifier_references_in_range(
+            text,
+            LspRange {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 2,
+                    character: 20,
+                },
+            },
+            "foo",
+        );
+
+        let names = refs.into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "bar"));
+        assert!(names.iter().any(|name| name == "baz"));
+        assert!(!names.iter().any(|name| name == "foo"));
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn best_enclosing_symbol_prefers_smallest_container() {
+        let uri = Url::parse("file:///tmp/Example.thy").expect("file url");
+        let broad = SymbolInformation {
+            name: "Outer".to_string(),
+            kind: SymbolKind::MODULE,
+            tags: None,
+            location: Location {
+                uri: uri.clone(),
+                range: LspRange {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 20,
+                        character: 0,
+                    },
+                },
+            },
+            deprecated: None,
+            container_name: None,
+        };
+        let narrow = SymbolInformation {
+            name: "Inner".to_string(),
+            kind: SymbolKind::FUNCTION,
+            tags: None,
+            location: Location {
+                uri,
+                range: LspRange {
+                    start: Position {
+                        line: 10,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 12,
+                        character: 0,
+                    },
+                },
+            },
+            deprecated: None,
+            container_name: None,
+        };
+
+        let symbols = vec![broad, narrow.clone()];
+        let selected = super::best_enclosing_symbol(
+            &symbols,
+            Position {
+                line: 11,
+                character: 2,
+            },
+        )
+        .expect("enclosing symbol");
+        assert_eq!(selected.name, "Inner");
     }
 
     #[test]
