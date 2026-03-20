@@ -6,8 +6,9 @@ mod transport;
 #[cfg(all(test, unix))]
 use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
-    CompletionItemPayload, DocumentCheckPayload, DocumentUriPayload, LocationPayload,
-    MarkupPayload, Message, MessageType, Position as BridgePosition, QueryPayload, SymbolPayload,
+    CodeActionPayload as BridgeCodeActionPayload, CompletionItemPayload, DocumentCheckPayload,
+    DocumentUriPayload, LocationPayload, MarkupPayload, Message, MessageType,
+    Position as BridgePosition, QueryPayload, RenamePayload, SymbolPayload, TextEditPayload,
 };
 use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
 use push::{PushEvent, spawn_push_worker};
@@ -19,13 +20,15 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::Duration;
 use tower_lsp::jsonrpc::Result as JsonRpcResult;
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandOptions, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, Location, MarkedString, MessageType as LspMessageType,
-    OneOf, Position, Range as LspRange, ReferenceParams, ServerCapabilities, ServerInfo,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, CodeActionResponse, CompletionItem, CompletionItemKind,
+    CompletionOptions, CompletionParams, CompletionResponse, DocumentSymbolParams,
+    DocumentSymbolResponse, ExecuteCommandOptions, GotoDefinitionParams, GotoDefinitionResponse,
+    Hover, HoverContents, HoverProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, Location, MarkedString, MessageType as LspMessageType, OneOf, Position,
+    Range as LspRange, ReferenceParams, RenameParams, ServerCapabilities, ServerInfo,
     SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url, WorkspaceEdit,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info};
@@ -390,6 +393,80 @@ impl IsabelleLanguageServer {
             .collect())
     }
 
+    async fn rename_workspace_edit(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+        new_name: String,
+    ) -> Result<Option<WorkspaceEdit>, String> {
+        if !self.is_session_running().await {
+            return Ok(None);
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(RenamePayload {
+            uri: uri.to_string(),
+            offset: lsp_position_to_bridge(position),
+            new_name,
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::Rename, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::Rename {
+            return Err(format!(
+                "unexpected response type from bridge: {:?}",
+                response.msg_type
+            ));
+        }
+
+        let edits = response
+            .text_edits_payload()
+            .map_err(|err| err.to_string())?;
+        Ok(workspace_edit_from_payload(edits))
+    }
+
+    async fn code_actions(&self, uri: &Url, version: i64) -> Result<CodeActionResponse, String> {
+        if !self.is_session_running().await {
+            return Ok(Vec::new());
+        }
+
+        self.flush_pushes(Some(vec![uri.clone()])).await;
+
+        let payload = serde_json::to_value(DocumentUriPayload {
+            uri: uri.to_string(),
+        })
+        .map_err(|err| err.to_string())?;
+
+        let response = self
+            .bridge
+            .request(MessageType::CodeAction, version, payload)
+            .await
+            .map_err(|err| err.to_string())?;
+
+        if response.msg_type != MessageType::CodeAction {
+            return Err(format!(
+                "unexpected response type from bridge: {:?}",
+                response.msg_type
+            ));
+        }
+
+        let actions = response
+            .code_actions_payload()
+            .map_err(|err| err.to_string())?;
+        Ok(actions
+            .into_iter()
+            .map(bridge_code_action_to_lsp)
+            .map(CodeActionOrCommand::CodeAction)
+            .collect())
+    }
+
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
         if !self.is_session_running().await {
             return Err("isabelle session is stopped".to_string());
@@ -498,6 +575,8 @@ impl LanguageServer for IsabelleLanguageServer {
                     ..CompletionOptions::default()
                 }),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
                         COMMAND_START_SESSION.to_string(),
@@ -675,6 +754,49 @@ impl LanguageServer for IsabelleLanguageServer {
         }
     }
 
+    async fn rename(&self, params: RenameParams) -> JsonRpcResult<Option<WorkspaceEdit>> {
+        let uri = params.text_document_position.text_document.uri;
+        let position = params.text_document_position.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self
+            .rename_workspace_edit(&uri, position, version, params.new_name)
+            .await
+        {
+            Ok(edit) => Ok(edit),
+            Err(err) => {
+                self.log_error(format!("failed to request rename: {err}"))
+                    .await;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> JsonRpcResult<Option<CodeActionResponse>> {
+        let uri = params.text_document.uri;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.code_actions(&uri, version).await {
+            Ok(actions) => Ok(Some(actions)),
+            Err(err) => {
+                self.log_error(format!("failed to request code actions: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+
     async fn execute_command(
         &self,
         params: tower_lsp::lsp_types::ExecuteCommandParams,
@@ -798,6 +920,52 @@ fn bridge_symbol_kind(kind: &str) -> SymbolKind {
         "function" => SymbolKind::FUNCTION,
         "theorem" => SymbolKind::CONSTANT,
         _ => SymbolKind::VARIABLE,
+    }
+}
+
+fn workspace_edit_from_payload(edits: Vec<TextEditPayload>) -> Option<WorkspaceEdit> {
+    let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+    for edit in edits {
+        let Ok(uri) = Url::parse(&edit.uri) else {
+            continue;
+        };
+        changes.entry(uri).or_default().push(TextEdit {
+            range: bridge_range_to_lsp(edit.range),
+            new_text: edit.new_text,
+        });
+    }
+
+    if changes.is_empty() {
+        return None;
+    }
+
+    Some(WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    })
+}
+
+fn bridge_code_action_to_lsp(action: BridgeCodeActionPayload) -> CodeAction {
+    let kind = bridge_code_action_kind(&action.kind);
+    let edit = workspace_edit_from_payload(action.edits);
+    CodeAction {
+        title: action.title,
+        kind,
+        diagnostics: None,
+        edit,
+        command: None,
+        is_preferred: None,
+        disabled: None,
+        data: None,
+    }
+}
+
+fn bridge_code_action_kind(kind: &str) -> Option<CodeActionKind> {
+    match kind {
+        "quickfix" => Some(CodeActionKind::QUICKFIX),
+        "refactor" => Some(CodeActionKind::REFACTOR),
+        _ => None,
     }
 }
 

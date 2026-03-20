@@ -1,8 +1,9 @@
 use crate::protocol::{
-    CompletionItemPayload, Diagnostic, DocumentUriPayload, LocationPayload, Message, MessageType,
-    Position, QueryPayload, Range, Severity, SymbolPayload, completion_message_from_request,
+    CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentUriPayload, LocationPayload,
+    Message, MessageType, Position, QueryPayload, Range, RenamePayload, Severity, SymbolPayload,
+    TextEditPayload, code_actions_message_from_request, completion_message_from_request,
     diagnostics_message_from_request, location_message_from_request, markup_message_from_request,
-    parse_message, symbols_message_from_request, to_ndjson,
+    parse_message, symbols_message_from_request, text_edits_message_from_request, to_ndjson,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -455,6 +456,14 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 symbols_message_from_request(&request, Vec::<SymbolPayload>::new())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
+            MessageType::Rename => {
+                text_edits_message_from_request(&request, MessageType::Rename, Vec::new())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::CodeAction => {
+                code_actions_message_from_request(&request, Vec::<CodeActionPayload>::new())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
             MessageType::Diagnostics => {
                 continue;
             }
@@ -700,6 +709,74 @@ impl RealAdapterState {
             .collect()
     }
 
+    async fn rename_edits(
+        &self,
+        uri: &str,
+        offset: Position,
+        new_name: String,
+    ) -> Vec<TextEditPayload> {
+        if new_name.trim().is_empty() {
+            return Vec::new();
+        }
+
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+
+        let Some((identifier, _, _)) = identifier_at_position(
+            &text,
+            normalize_one_based(offset.line),
+            normalize_one_based(offset.col),
+        ) else {
+            return Vec::new();
+        };
+
+        identifier_ranges(&text, &identifier)
+            .into_iter()
+            .map(|range| TextEditPayload {
+                uri: uri.to_string(),
+                range,
+                new_text: new_name.clone(),
+            })
+            .collect()
+    }
+
+    async fn code_actions(&self, uri: &str) -> Vec<CodeActionPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+
+        let mut actions = Vec::new();
+        for (line_index, line_text) in text.lines().enumerate() {
+            for (token, start_col, end_col) in identifier_tokens_in_line(line_text) {
+                if token != "sorry" {
+                    continue;
+                }
+
+                actions.push(CodeActionPayload {
+                    title: format!("Replace sorry with by simp (line {})", line_index + 1),
+                    kind: "quickfix".to_string(),
+                    edits: vec![TextEditPayload {
+                        uri: uri.to_string(),
+                        range: Range {
+                            start: Position {
+                                line: i64::try_from(line_index + 1).unwrap_or(i64::MAX),
+                                col: i64::try_from(start_col).unwrap_or(i64::MAX),
+                            },
+                            end: Position {
+                                line: i64::try_from(line_index + 1).unwrap_or(i64::MAX),
+                                col: i64::try_from(end_col).unwrap_or(i64::MAX),
+                            },
+                        },
+                        new_text: "by simp".to_string(),
+                    }],
+                });
+            }
+        }
+
+        actions
+    }
+
     async fn resolve_text(&self, uri: &str) -> Option<String> {
         if let Some(cached) = self.latest_documents.get(uri) {
             return Some(cached.text.clone());
@@ -828,6 +905,23 @@ pub async fn run_real_adapter(
                         .map_err(|err| ProcessError::Protocol(err.to_string()))?;
                 let symbols = state.document_symbols(&payload.uri).await;
                 symbols_message_from_request(&request, symbols)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::Rename => {
+                let payload: RenamePayload = serde_json::from_value(request.payload.clone())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let edits = state
+                    .rename_edits(&payload.uri, payload.offset, payload.new_name)
+                    .await;
+                text_edits_message_from_request(&request, MessageType::Rename, edits)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::CodeAction => {
+                let payload: DocumentUriPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let actions = state.code_actions(&payload.uri).await;
+                code_actions_message_from_request(&request, actions)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::Diagnostics => {
@@ -1405,6 +1499,49 @@ Unfinished session(s): Draft
         let labels = items.into_iter().map(|item| item.label).collect::<Vec<_>>();
         assert!(labels.contains(&"foo_bar".to_string()));
         assert!(labels.contains(&"fooz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn rename_edits_rewrite_all_identifier_occurrences() {
+        let uri = "file:///tmp/Example.thy";
+        let text = "lemma foo: True\nhave foo by simp\nshow foo by simp\n";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: text.to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let edits = state
+            .rename_edits(uri, Position { line: 1, col: 7 }, "bar".to_string())
+            .await;
+        assert_eq!(edits.len(), 3);
+        assert!(edits.iter().all(|edit| edit.new_text == "bar"));
+    }
+
+    #[tokio::test]
+    async fn code_actions_provides_quickfix_for_sorry() {
+        let uri = "file:///tmp/Example.thy";
+        let text = "lemma foo: True\n  sorry\n";
+        let mut state =
+            RealAdapterState::new("isabelle".to_string(), "HOL".to_string(), Vec::new());
+        state.latest_documents.insert(
+            uri.to_string(),
+            CachedDocument {
+                text: text.to_string(),
+                version: 1,
+                diagnostics: Vec::new(),
+            },
+        );
+
+        let actions = state.code_actions(uri).await;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].kind, "quickfix");
+        assert_eq!(actions[0].edits[0].new_text, "by simp");
     }
 
     #[test]

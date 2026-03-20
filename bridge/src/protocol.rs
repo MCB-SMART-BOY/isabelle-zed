@@ -18,6 +18,10 @@ pub enum MessageType {
     Completion,
     #[serde(rename = "document.symbols")]
     DocumentSymbols,
+    #[serde(rename = "rename")]
+    Rename,
+    #[serde(rename = "code_action")]
+    CodeAction,
     #[serde(rename = "diagnostics")]
     Diagnostics,
     #[serde(rename = "markup")]
@@ -66,6 +70,14 @@ pub struct QueryPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct RenamePayload {
+    pub uri: String,
+    pub offset: Position,
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct DocumentUriPayload {
     pub uri: String,
 }
@@ -92,6 +104,22 @@ pub struct SymbolPayload {
     pub name: String,
     pub kind: String,
     pub range: Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TextEditPayload {
+    pub uri: String,
+    pub range: Range,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeActionPayload {
+    pub title: String,
+    pub kind: String,
+    pub edits: Vec<TextEditPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -180,6 +208,10 @@ impl Message {
         self.payload_as()
     }
 
+    pub fn rename_payload(&self) -> Result<RenamePayload, ProtocolError> {
+        self.payload_as()
+    }
+
     pub fn location_payload(&self) -> Result<Vec<LocationPayload>, ProtocolError> {
         self.payload_as()
     }
@@ -189,6 +221,14 @@ impl Message {
     }
 
     pub fn symbols_payload(&self) -> Result<Vec<SymbolPayload>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn text_edits_payload(&self) -> Result<Vec<TextEditPayload>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn code_actions_payload(&self) -> Result<Vec<CodeActionPayload>, ProtocolError> {
         self.payload_as()
     }
 }
@@ -276,5 +316,32 @@ pub fn symbols_message_from_request(
         session: request.session.clone(),
         version: request.version,
         payload: serde_json::to_value(symbols)?,
+    })
+}
+
+pub fn text_edits_message_from_request(
+    request: &Message,
+    msg_type: MessageType,
+    edits: Vec<TextEditPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(edits)?,
+    })
+}
+
+pub fn code_actions_message_from_request(
+    request: &Message,
+    actions: Vec<CodeActionPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::CodeAction,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(actions)?,
     })
 }

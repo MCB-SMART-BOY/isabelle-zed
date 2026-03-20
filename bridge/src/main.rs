@@ -342,7 +342,12 @@ fn pending_uri_for_message(message: &Message) -> Option<String> {
         MessageType::Definition | MessageType::References | MessageType::Completion => {
             message.query_payload().ok().map(|payload| payload.uri)
         }
+        MessageType::Rename => message.rename_payload().ok().map(|payload| payload.uri),
         MessageType::DocumentSymbols => message
+            .document_uri_payload()
+            .ok()
+            .map(|payload| payload.uri),
+        MessageType::CodeAction => message
             .document_uri_payload()
             .ok()
             .map(|payload| payload.uri),
