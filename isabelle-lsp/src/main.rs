@@ -20,22 +20,27 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::time::Duration;
 use tower_lsp::jsonrpc::Result as JsonRpcResult;
-use tower_lsp::lsp_types::request::{GotoDeclarationParams, GotoDeclarationResponse};
+use tower_lsp::lsp_types::request::{
+    GotoDeclarationParams, GotoDeclarationResponse, GotoImplementationParams,
+    GotoImplementationResponse, GotoTypeDefinitionParams, GotoTypeDefinitionResponse,
+};
 use tower_lsp::lsp_types::{
     CodeAction, CodeActionKind, CodeActionOrCommand, CodeActionParams,
     CodeActionProviderCapability, CodeActionResponse, CompletionItem, CompletionItemKind,
     CompletionOptions, CompletionParams, CompletionResponse, DeclarationCapability,
     DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentSymbolParams,
-    DocumentSymbolResponse, ExecuteCommandOptions, GotoDefinitionParams, GotoDefinitionResponse,
-    Hover, HoverContents, HoverProviderCapability, InitializeParams, InitializeResult,
-    InitializedParams, Location, MarkedString, MessageType as LspMessageType, OneOf, Position,
-    PrepareRenameResponse, Range as LspRange, ReferenceParams, RenameOptions, RenameParams,
+    DocumentSymbolResponse, ExecuteCommandOptions, FoldingRange, FoldingRangeParams,
+    FoldingRangeProviderCapability, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverProviderCapability, ImplementationProviderCapability, InitializeParams,
+    InitializeResult, InitializedParams, Location, MarkedString, MessageType as LspMessageType,
+    OneOf, Position, PrepareRenameResponse, Range as LspRange, ReferenceParams, RenameOptions,
+    RenameParams, SelectionRange, SelectionRangeParams, SelectionRangeProviderCapability,
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, ServerInfo,
     SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
-    WorkspaceEdit, WorkspaceSymbolParams,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    TypeDefinitionProviderCapability, Url, WorkspaceEdit, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 use tracing::{error, info};
@@ -591,6 +596,49 @@ impl IsabelleLanguageServer {
             .collect())
     }
 
+    async fn type_definition_locations(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+    ) -> Result<Vec<Location>, String> {
+        self.definition_locations(uri, position, version).await
+    }
+
+    async fn implementation_locations(
+        &self,
+        uri: &Url,
+        position: Position,
+        version: i64,
+    ) -> Result<Vec<Location>, String> {
+        self.definition_locations(uri, position, version).await
+    }
+
+    async fn selection_ranges(
+        &self,
+        uri: &Url,
+        positions: Vec<Position>,
+    ) -> Result<Vec<SelectionRange>, String> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        Ok(positions
+            .into_iter()
+            .map(|position| selection_range_for_position(&text, position))
+            .collect())
+    }
+
+    async fn folding_ranges(&self, uri: &Url) -> Result<Vec<FoldingRange>, String> {
+        let text = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.text)
+            .unwrap_or_default();
+        Ok(folding_ranges_from_text(&text))
+    }
+
     async fn run_check_command(&self, target_uri: Option<String>) -> Result<(), String> {
         if !self.is_session_running().await {
             return Err("isabelle session is stopped".to_string());
@@ -692,6 +740,8 @@ impl LanguageServer for IsabelleLanguageServer {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+                implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
                 declaration_provider: Some(DeclarationCapability::Simple(true)),
                 references_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
@@ -716,6 +766,8 @@ impl LanguageServer for IsabelleLanguageServer {
                         },
                     ),
                 ),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
+                folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 workspace_symbol_provider: Some(OneOf::Left(true)),
                 execute_command_provider: Some(ExecuteCommandOptions {
                     commands: vec![
@@ -832,6 +884,55 @@ impl LanguageServer for IsabelleLanguageServer {
         }
     }
 
+    async fn goto_type_definition(
+        &self,
+        params: GotoTypeDefinitionParams,
+    ) -> JsonRpcResult<Option<GotoTypeDefinitionResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self
+            .type_definition_locations(&uri, position, version)
+            .await
+        {
+            Ok(locations) if locations.is_empty() => Ok(None),
+            Ok(locations) => Ok(Some(GotoTypeDefinitionResponse::Array(locations))),
+            Err(err) => {
+                self.log_error(format!("failed to request type definition: {err}"))
+                    .await;
+                Ok(None)
+            }
+        }
+    }
+
+    async fn goto_implementation(
+        &self,
+        params: GotoImplementationParams,
+    ) -> JsonRpcResult<Option<GotoImplementationResponse>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let position = params.text_document_position_params.position;
+        let version = self
+            .document_snapshot(&uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        match self.implementation_locations(&uri, position, version).await {
+            Ok(locations) if locations.is_empty() => Ok(None),
+            Ok(locations) => Ok(Some(GotoImplementationResponse::Array(locations))),
+            Err(err) => {
+                self.log_error(format!("failed to request implementation: {err}"))
+                    .await;
+                Ok(None)
+            }
+        }
+    }
+
     async fn goto_declaration(
         &self,
         params: GotoDeclarationParams,
@@ -890,6 +991,36 @@ impl LanguageServer for IsabelleLanguageServer {
             Ok(highlights) => Ok(Some(highlights)),
             Err(err) => {
                 self.log_error(format!("failed to request document highlights: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> JsonRpcResult<Option<Vec<SelectionRange>>> {
+        let uri = params.text_document.uri;
+        match self.selection_ranges(&uri, params.positions).await {
+            Ok(ranges) => Ok(Some(ranges)),
+            Err(err) => {
+                self.log_error(format!("failed to compute selection ranges: {err}"))
+                    .await;
+                Ok(Some(Vec::new()))
+            }
+        }
+    }
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> JsonRpcResult<Option<Vec<FoldingRange>>> {
+        let uri = params.text_document.uri;
+        match self.folding_ranges(&uri).await {
+            Ok(ranges) => Ok(Some(ranges)),
+            Err(err) => {
+                self.log_error(format!("failed to compute folding ranges: {err}"))
                     .await;
                 Ok(Some(Vec::new()))
             }
@@ -1098,6 +1229,179 @@ fn lsp_position_in_range(position: Position, range: LspRange) -> bool {
         return false;
     }
     true
+}
+
+fn selection_range_for_position(text: &str, position: Position) -> SelectionRange {
+    let mut selection = SelectionRange {
+        range: full_document_range(text),
+        parent: None,
+    };
+
+    let lines = text.lines().collect::<Vec<_>>();
+    let line_index = usize::try_from(position.line).unwrap_or(usize::MAX);
+    if line_index >= lines.len() {
+        return selection;
+    }
+
+    let line = lines[line_index];
+    let line_len = u32::try_from(line.chars().count()).unwrap_or(u32::MAX);
+    let line_range = LspRange {
+        start: Position {
+            line: position.line,
+            character: 0,
+        },
+        end: Position {
+            line: position.line,
+            character: line_len,
+        },
+    };
+    selection = SelectionRange {
+        range: line_range,
+        parent: Some(Box::new(selection)),
+    };
+
+    if let Some((start, end)) = identifier_bounds_in_line(line, position.character) {
+        selection = SelectionRange {
+            range: LspRange {
+                start: Position {
+                    line: position.line,
+                    character: start,
+                },
+                end: Position {
+                    line: position.line,
+                    character: end,
+                },
+            },
+            parent: Some(Box::new(selection)),
+        };
+    }
+
+    selection
+}
+
+fn full_document_range(text: &str) -> LspRange {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return LspRange {
+            start: Position {
+                line: 0,
+                character: 0,
+            },
+            end: Position {
+                line: 0,
+                character: 0,
+            },
+        };
+    }
+
+    let last_line = u32::try_from(lines.len().saturating_sub(1)).unwrap_or(u32::MAX);
+    let last_len = u32::try_from(lines.last().map(|line| line.chars().count()).unwrap_or(0))
+        .unwrap_or(u32::MAX);
+    LspRange {
+        start: Position {
+            line: 0,
+            character: 0,
+        },
+        end: Position {
+            line: last_line,
+            character: last_len,
+        },
+    }
+}
+
+fn identifier_bounds_in_line(line: &str, character: u32) -> Option<(u32, u32)> {
+    let chars = line.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return None;
+    }
+
+    let mut index = usize::try_from(character).unwrap_or(usize::MAX);
+    if index >= chars.len() {
+        index = chars.len().saturating_sub(1);
+    }
+    if !is_isabelle_identifier_char(chars[index])
+        && index > 0
+        && is_isabelle_identifier_char(chars[index - 1])
+    {
+        index = index.saturating_sub(1);
+    }
+    if !is_isabelle_identifier_char(chars[index]) {
+        return None;
+    }
+
+    let mut start = index;
+    while start > 0 && is_isabelle_identifier_char(chars[start - 1]) {
+        start = start.saturating_sub(1);
+    }
+
+    let mut end = index;
+    while end + 1 < chars.len() && is_isabelle_identifier_char(chars[end + 1]) {
+        end += 1;
+    }
+
+    let start_u32 = u32::try_from(start).unwrap_or(0);
+    let end_exclusive = u32::try_from(end.saturating_add(1)).unwrap_or(u32::MAX);
+    Some((start_u32, end_exclusive))
+}
+
+fn is_isabelle_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '\'' | '.' | '-')
+}
+
+fn line_identifier_tokens(line: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+
+    for ch in line.chars() {
+        if is_isabelle_identifier_char(ch) {
+            current.push(ch);
+            continue;
+        }
+        if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn folding_ranges_from_text(text: &str) -> Vec<FoldingRange> {
+    let mut ranges = Vec::new();
+    let mut stack = Vec::<u32>::new();
+
+    for (line_index, line_text) in text.lines().enumerate() {
+        let line = u32::try_from(line_index).unwrap_or(u32::MAX);
+        for token in line_identifier_tokens(line_text) {
+            match token.as_str() {
+                "begin" | "proof" => stack.push(line),
+                "end" | "qed" | "oops" => {
+                    if let Some(start) = stack.pop()
+                        && line > start
+                    {
+                        ranges.push(FoldingRange {
+                            start_line: start,
+                            start_character: None,
+                            end_line: line,
+                            end_character: None,
+                            kind: None,
+                            collapsed_text: None,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    ranges.sort_by(|a, b| {
+        a.start_line
+            .cmp(&b.start_line)
+            .then_with(|| a.end_line.cmp(&b.end_line))
+    });
+    ranges.dedup_by(|a, b| a.start_line == b.start_line && a.end_line == b.end_line);
+    ranges
 }
 
 fn command_target_uri(argument: Option<&Value>) -> Option<String> {
@@ -1464,6 +1768,46 @@ mod tests {
             },
             range
         ));
+    }
+
+    #[test]
+    fn selection_range_for_position_builds_nested_ranges() {
+        let text = "theory Demo imports Main begin\nlemma foo_bar: True by simp\nend\n";
+        let selection = super::selection_range_for_position(
+            text,
+            Position {
+                line: 1,
+                character: 8,
+            },
+        );
+        assert_eq!(selection.range.start.line, 1);
+        assert_eq!(selection.range.start.character, 6);
+        assert_eq!(selection.range.end.character, 13);
+        assert!(selection.parent.is_some());
+        assert!(
+            selection
+                .parent
+                .as_ref()
+                .and_then(|line| line.parent.as_ref())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn folding_ranges_from_text_detects_theory_and_proof_blocks() {
+        let text =
+            "theory Demo imports Main begin\nlemma foo: True\nproof\nshow True by simp\nqed\nend\n";
+        let ranges = super::folding_ranges_from_text(text);
+        assert!(
+            ranges
+                .iter()
+                .any(|range| range.start_line == 0 && range.end_line == 5)
+        );
+        assert!(
+            ranges
+                .iter()
+                .any(|range| range.start_line == 2 && range.end_line == 4)
+        );
     }
 
     #[cfg(unix)]
