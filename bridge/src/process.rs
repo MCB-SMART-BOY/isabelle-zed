@@ -1,13 +1,14 @@
 use crate::protocol::{
     CodeActionPayload, CompletionItemPayload, Diagnostic, DocumentLinkPayload, DocumentUriPayload,
-    LocationPayload, Message, MessageType, Position, QueryPayload, Range, RenamePayload,
-    RenameResultPayload, SemanticTokenPayload, Severity, SignatureHelpPayload, SymbolPayload,
-    TextEditPayload, WorkspaceSymbolQueryPayload, code_actions_message_from_request,
+    InlayHintPayload, LocationPayload, Message, MessageType, Position, QueryPayload, Range,
+    RenamePayload, RenameResultPayload, SemanticTokenPayload, Severity, SignatureHelpPayload,
+    SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload, code_actions_message_from_request,
     completion_message_from_request, diagnostics_message_from_request,
-    document_links_message_from_request, location_message_from_request,
-    markup_message_from_request, parse_message, rename_message_from_request,
-    semantic_tokens_message_from_request, signature_help_message_from_request,
-    symbols_message_from_request, to_ndjson, workspace_symbols_message_from_request,
+    document_links_message_from_request, inlay_hints_message_from_request,
+    location_message_from_request, markup_message_from_request, parse_message,
+    rename_message_from_request, semantic_tokens_message_from_request,
+    signature_help_message_from_request, symbols_message_from_request, to_ndjson,
+    workspace_symbols_message_from_request,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -480,6 +481,10 @@ pub async fn run_mock_adapter() -> Result<(), ProcessError> {
                 document_links_message_from_request(&request, Vec::<DocumentLinkPayload>::new())
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
+            MessageType::InlayHints => {
+                inlay_hints_message_from_request(&request, Vec::<InlayHintPayload>::new())
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
             MessageType::Diagnostics => {
                 continue;
             }
@@ -850,6 +855,13 @@ impl RealAdapterState {
         document_links_from_text(uri, &text)
     }
 
+    async fn inlay_hints(&self, uri: &str) -> Vec<InlayHintPayload> {
+        let Some(text) = self.resolve_text(uri).await else {
+            return Vec::new();
+        };
+        inlay_hints_from_text(&text)
+    }
+
     async fn rename_result(
         &self,
         uri: &str,
@@ -1197,6 +1209,14 @@ pub async fn run_real_adapter(
                         .map_err(|err| ProcessError::Protocol(err.to_string()))?;
                 let links = state.document_links(&payload.uri).await;
                 document_links_message_from_request(&request, links)
+                    .map_err(|err| ProcessError::Protocol(err.to_string()))?
+            }
+            MessageType::InlayHints => {
+                let payload: DocumentUriPayload =
+                    serde_json::from_value(request.payload.clone())
+                        .map_err(|err| ProcessError::Protocol(err.to_string()))?;
+                let hints = state.inlay_hints(&payload.uri).await;
+                inlay_hints_message_from_request(&request, hints)
                     .map_err(|err| ProcessError::Protocol(err.to_string()))?
             }
             MessageType::Diagnostics => {
@@ -1919,6 +1939,83 @@ fn line_identifier_spans(line: &str) -> Vec<(String, u32, u32)> {
     spans
 }
 
+fn inlay_hints_from_text(text: &str) -> Vec<InlayHintPayload> {
+    let mut hints = Vec::new();
+    for (line_index, line_text) in text.lines().enumerate() {
+        let line = u32::try_from(line_index).unwrap_or(u32::MAX);
+        let spans = line_identifier_spans(line_text);
+
+        if let Some((keyword, _, end)) = spans.first() {
+            match keyword.as_str() {
+                "lemma" | "theorem" | "corollary" | "proposition" => push_inlay_hint(
+                    &mut hints,
+                    line,
+                    *end,
+                    " : proposition".to_string(),
+                    Some("type".to_string()),
+                ),
+                "definition" | "abbreviation" | "fun" | "function" | "primrec" => push_inlay_hint(
+                    &mut hints,
+                    line,
+                    *end,
+                    " : definition".to_string(),
+                    Some("type".to_string()),
+                ),
+                _ => {}
+            }
+        }
+
+        for pair in spans.windows(2) {
+            let (prefix, _, _) = &pair[0];
+            let (_, start, _) = &pair[1];
+            let label = match prefix.as_str() {
+                "by" | "apply" => Some("method: "),
+                "using" => Some("facts: "),
+                "unfolding" => Some("defs: "),
+                _ => None,
+            };
+            if let Some(label) = label {
+                push_inlay_hint(
+                    &mut hints,
+                    line,
+                    *start,
+                    label.to_string(),
+                    Some("parameter".to_string()),
+                );
+            }
+        }
+    }
+
+    hints.sort_by(|a, b| {
+        a.position
+            .line
+            .cmp(&b.position.line)
+            .then_with(|| a.position.col.cmp(&b.position.col))
+            .then_with(|| a.label.cmp(&b.label))
+    });
+    hints.dedup_by(|a, b| {
+        a.position.line == b.position.line && a.position.col == b.position.col && a.label == b.label
+    });
+    hints
+}
+
+fn push_inlay_hint(
+    hints: &mut Vec<InlayHintPayload>,
+    line_zero_based: u32,
+    character_zero_based: u32,
+    label: String,
+    kind: Option<String>,
+) {
+    hints.push(InlayHintPayload {
+        position: Position {
+            line: i64::from(line_zero_based.saturating_add(1)),
+            col: i64::from(character_zero_based.saturating_add(1)),
+        },
+        label,
+        kind,
+    });
+}
+
 const COMPLETION_KEYWORDS: &[&str] = &[
     "theory",
     "imports",
@@ -2562,6 +2659,29 @@ Unfinished session(s): Draft
             links
                 .iter()
                 .any(|link| link.target.as_deref() == Some(expected.as_str()))
+        );
+    }
+
+    #[test]
+    fn inlay_hints_from_text_emits_type_and_method_labels() {
+        let hints = inlay_hints_from_text("lemma plus_comm: \"a + b = b + a\"\n  by simp\n");
+        let labels = hints
+            .iter()
+            .map(|hint| hint.label.clone())
+            .collect::<Vec<_>>();
+
+        assert!(labels.iter().any(|label| label == " : proposition"));
+        assert!(labels.iter().any(|label| label == "method: "));
+    }
+
+    #[test]
+    fn inlay_hints_from_text_marks_parameter_kind() {
+        let hints =
+            inlay_hints_from_text("lemma plus_comm: \"a + b = b + a\"\n  using add.commute\n");
+        assert!(
+            hints
+                .iter()
+                .any(|hint| hint.label == "facts: " && hint.kind.as_deref() == Some("parameter"))
         );
     }
 

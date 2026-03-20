@@ -104,3 +104,17 @@ fn document_links_payload_decodes_array() {
         Some("https://isabelle.in.tum.de")
     );
 }
+
+#[test]
+fn inlay_hints_payload_decodes_array() {
+    let raw = r#"{"id":"msg-0005","type":"inlay_hints","session":"s1","version":1,"payload":[{"position":{"line":2,"col":6},"label":"method: ","kind":"parameter"}]}"#;
+    let message = parse_message(raw).expect("inlay_hints payload should parse");
+    assert_eq!(message.msg_type, MessageType::InlayHints);
+
+    let payload = message
+        .inlay_hints_payload()
+        .expect("inlay_hints payload should decode");
+    assert_eq!(payload.len(), 1);
+    assert_eq!(payload[0].label, "method: ");
+    assert_eq!(payload[0].kind.as_deref(), Some("parameter"));
+}

@@ -30,6 +30,8 @@ pub enum MessageType {
     SignatureHelp,
     #[serde(rename = "document_links")]
     DocumentLinks,
+    #[serde(rename = "inlay_hints")]
+    InlayHints,
     #[serde(rename = "diagnostics")]
     Diagnostics,
     #[serde(rename = "markup")]
@@ -176,6 +178,15 @@ pub struct DocumentLinkPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct InlayHintPayload {
+    pub position: Position,
+    pub label: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Diagnostic {
     pub uri: String,
     pub range: Range,
@@ -297,6 +308,10 @@ impl Message {
     }
 
     pub fn document_links_payload(&self) -> Result<Vec<DocumentLinkPayload>, ProtocolError> {
+        self.payload_as()
+    }
+
+    pub fn inlay_hints_payload(&self) -> Result<Vec<InlayHintPayload>, ProtocolError> {
         self.payload_as()
     }
 
@@ -483,5 +498,18 @@ pub fn document_links_message_from_request(
         session: request.session.clone(),
         version: request.version,
         payload: serde_json::to_value(links)?,
+    })
+}
+
+pub fn inlay_hints_message_from_request(
+    request: &Message,
+    hints: Vec<InlayHintPayload>,
+) -> Result<Message, ProtocolError> {
+    Ok(Message {
+        id: request.id.clone(),
+        msg_type: MessageType::InlayHints,
+        session: request.session.clone(),
+        version: request.version,
+        payload: serde_json::to_value(hints)?,
     })
 }

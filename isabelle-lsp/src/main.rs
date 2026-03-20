@@ -7,10 +7,11 @@ mod transport;
 use bridge::protocol::DocumentPushPayload;
 use bridge::protocol::{
     CodeActionPayload as BridgeCodeActionPayload, CompletionItemPayload, DocumentCheckPayload,
-    DocumentLinkPayload as BridgeDocumentLinkPayload, DocumentUriPayload, LocationPayload,
-    MarkupPayload, Message, MessageType, Position as BridgePosition, QueryPayload, RenamePayload,
-    RenameResultPayload, SemanticTokenPayload, SignatureHelpPayload as BridgeSignatureHelpPayload,
-    SymbolPayload, TextEditPayload, WorkspaceSymbolQueryPayload,
+    DocumentLinkPayload as BridgeDocumentLinkPayload, DocumentUriPayload,
+    InlayHintPayload as BridgeInlayHintPayload, LocationPayload, MarkupPayload, Message,
+    MessageType, Position as BridgePosition, QueryPayload, RenamePayload, RenameResultPayload,
+    SemanticTokenPayload, SignatureHelpPayload as BridgeSignatureHelpPayload, SymbolPayload,
+    TextEditPayload, WorkspaceSymbolQueryPayload,
 };
 use diagnostics::{PublishedDiagnosticTargets, publish_diagnostics_for};
 use push::{PushEvent, spawn_push_worker};
@@ -732,6 +733,48 @@ impl IsabelleLanguageServer {
     }
 
     async fn inlay_hints_for_uri_range(&self, uri: &Url, range: LspRange) -> Vec<InlayHint> {
+        let version = self
+            .document_snapshot(uri)
+            .await
+            .map(|snapshot| snapshot.version)
+            .unwrap_or(1);
+
+        if self.is_session_running().await {
+            self.flush_pushes(Some(vec![uri.clone()])).await;
+
+            let payload = serde_json::to_value(DocumentUriPayload {
+                uri: uri.to_string(),
+            });
+            if let Ok(payload) = payload
+                && let Ok(response) = self
+                    .bridge
+                    .request(MessageType::InlayHints, version, payload)
+                    .await
+                && response.msg_type == MessageType::InlayHints
+                && let Ok(hints) = response.inlay_hints_payload()
+            {
+                let mut mapped = hints
+                    .into_iter()
+                    .filter_map(bridge_inlay_hint_to_lsp)
+                    .filter(|hint| lsp_position_in_range(hint.position, range))
+                    .collect::<Vec<_>>();
+                mapped.sort_by(|a, b| {
+                    a.position
+                        .line
+                        .cmp(&b.position.line)
+                        .then_with(|| a.position.character.cmp(&b.position.character))
+                        .then_with(|| {
+                            inlay_hint_label_text(&a.label).cmp(&inlay_hint_label_text(&b.label))
+                        })
+                });
+                mapped.dedup_by(|a, b| {
+                    a.position == b.position
+                        && inlay_hint_label_text(&a.label) == inlay_hint_label_text(&b.label)
+                });
+                return mapped;
+            }
+        }
+
         let text = self
             .document_snapshot(uri)
             .await
@@ -2549,6 +2592,31 @@ fn bridge_document_link_to_lsp(payload: BridgeDocumentLinkPayload) -> Option<Doc
     })
 }
 
+fn bridge_inlay_hint_to_lsp(payload: BridgeInlayHintPayload) -> Option<InlayHint> {
+    if payload.label.is_empty() {
+        return None;
+    }
+
+    let line = u32::try_from(payload.position.line.saturating_sub(1)).ok()?;
+    let character = u32::try_from(payload.position.col.saturating_sub(1)).ok()?;
+    let kind = match payload.kind.as_deref() {
+        Some("type") => Some(InlayHintKind::TYPE),
+        Some("parameter") => Some(InlayHintKind::PARAMETER),
+        _ => None,
+    };
+
+    Some(InlayHint {
+        position: Position { line, character },
+        label: InlayHintLabel::String(payload.label),
+        kind,
+        text_edits: None,
+        tooltip: None,
+        padding_left: Some(true),
+        padding_right: Some(true),
+        data: None,
+    })
+}
+
 fn bridge_signature_help_to_lsp(payload: BridgeSignatureHelpPayload) -> SignatureHelp {
     let parameter_count = payload.parameters.len();
     let active_parameter = usize::try_from(payload.active_parameter.max(0)).unwrap_or(0);
@@ -2851,6 +2919,20 @@ mod tests {
             link.target.as_ref().map(Url::as_str),
             Some("https://isabelle.in.tum.de/")
         );
+    }
+
+    #[test]
+    fn bridge_inlay_hint_to_lsp_maps_position_label_and_kind() {
+        let hint = super::bridge_inlay_hint_to_lsp(BridgeInlayHintPayload {
+            position: BridgePosition { line: 2, col: 6 },
+            label: "method: ".to_string(),
+            kind: Some("parameter".to_string()),
+        })
+        .expect("inlay hint should map");
+
+        assert_eq!(hint.position.line, 1);
+        assert_eq!(hint.position.character, 5);
+        assert!(matches!(hint.kind, Some(InlayHintKind::PARAMETER)));
     }
 
     #[test]
